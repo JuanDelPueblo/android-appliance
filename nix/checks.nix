@@ -88,14 +88,17 @@ in
         touch $out
       '';
 
-  # Evaluate a full system with the module. This does not build or
-  # download the Android SDK.
+  # Evaluate a full system with the module. The string context is removed,
+  # because a drvPath with context makes Nix realise the whole build closure
+  # of the system.
   module =
     assert
       !(units.android-appliance-emulator ? wantedBy) || units.android-appliance-emulator.wantedBy == [ ];
     assert !(builtins.elem "android-appliance-emulator.service" bootUnits);
     assert units.android-appliance-emulator.serviceConfig.User == "tony";
-    pkgs.writeText "module-eval" system.config.system.build.toplevel.drvPath;
+    pkgs.writeText "module-eval" (
+      builtins.unsafeDiscardStringContext system.config.system.build.toplevel.drvPath
+    );
 
   formatting = pkgs.runCommand "nixfmt" { nativeBuildInputs = [ pkgs.nixfmt ]; } ''
     cd ${src}
