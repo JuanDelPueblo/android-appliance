@@ -99,7 +99,8 @@ t_status_suspended_does_not_wake() {
 
 t_start_from_stopped() {
   ctl start
-  grep -q '^systemctl start android-appliance-emulator.service$' "$FAKE/calls"
+  # Uses --no-block so Ctrl-C stops waiting, not the emulator start.
+  called "systemctl start --no-block android-appliance-emulator.service"
   [ -e "$FAKE/state/last-activity" ]
   state_is running
 }
@@ -107,6 +108,45 @@ t_start_from_stopped() {
 t_start_no_wait() {
   ctl start --no-wait
   called "systemctl start --no-block android-appliance-emulator.service"
+}
+
+t_restart_uses_no_block() {
+  running
+  ctl restart
+  called "systemctl restart --no-block android-appliance-emulator.service"
+  state_is running
+}
+
+t_boot_hook_fails_when_unit_dies() {
+  echo inactive >"$FAKE/unit"
+  echo 0 >"$FAKE/boot"
+  not ctl boot-hook
+  grep -q 'stopped during boot' "$FAKE/out"
+}
+
+t_boot_hook_fails_on_unauthorized() {
+  echo active >"$FAKE/unit"
+  echo 0 >"$FAKE/boot"
+  touch "$FAKE/unauthorized"
+  not ctl boot-hook
+  grep -q 'unauthorized' "$FAKE/out"
+}
+
+t_boot_timeout_reports_adb_state() {
+  echo active >"$FAKE/unit"
+  echo 0 >"$FAKE/boot"
+  touch "$FAKE/offline"
+  not ctl boot-hook
+  grep -q 'adb:offline' "$FAKE/out"
+}
+
+t_stop_hook_bounded_when_pid_lives() {
+  running
+  sleep 30 &
+  pid=$!
+  ANDROID_APPLIANCE_STOP_HOOK_TIMEOUT=2 MAINPID=$pid ctl stop-hook
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
 }
 
 t_start_resumes_suspended() {
@@ -126,7 +166,7 @@ t_start_running_is_noop() {
 
 t_tap_starts_stopped() {
   ctl tap 10 20
-  grep -q '^systemctl start' "$FAKE/calls"
+  called "systemctl start --no-block android-appliance-emulator.service"
   called "adb shell input tap 10 20"
 }
 

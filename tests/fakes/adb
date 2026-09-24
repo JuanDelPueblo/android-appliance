@@ -15,6 +15,15 @@ case "$*" in
     [ -e "$FAKE/paused" ] && exec sleep 60
     cat "$FAKE/boot"
     ;;
+  "get-state")
+    if [ -e "$FAKE/unauthorized" ]; then
+      echo unauthorized
+    elif [ -e "$FAKE/offline" ]; then
+      echo offline
+    else
+      echo device
+    fi
+    ;;
   "exec-out screencap -p") printf 'PNGDATA' ;;
   "shell uiautomator dump "*)
     # Fail once with a null root node, as a fresh boot can do.

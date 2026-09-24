@@ -48,4 +48,33 @@ grep -q "apiLevel does not upgrade existing AVDs" "$tmp/out"
 AVD_API=36 "$here/../src/avd-init" >"$tmp/out" 2>&1
 grep -q "keeping userdata" "$tmp/out"
 
+# A stale absolute registry path is refused, not followed.
+echo "avd.ini.encoding=UTF-8
+path=/srv/pool/vms/android/avd/android.avd
+target=android-36" >"$ANDROID_AVD_HOME/android.ini"
+before=$(cat "$config")
+"$here/../src/avd-init" >"$tmp/out" 2>&1 && {
+  echo "expected a refusal for the stale registry path"
+  exit 1
+}
+grep -q "refusing to inspect one AVD" "$tmp/out"
+[ "$(cat "$config")" = "$before" ]
+
+# A missing registry file is recreated pointing at the inspected AVD.
+rm "$ANDROID_AVD_HOME/android.ini"
+"$here/../src/avd-init" >"$tmp/out" 2>&1
+grep -q "keeping userdata" "$tmp/out"
+grep -qx "path=$ANDROID_AVD_HOME/android.avd" "$ANDROID_AVD_HOME/android.ini"
+
+# An adopted AVD with a stale low resolution is moved to native 1080x1920.
+sed -i 's/^hw.lcd.width=.*/hw.lcd.width=320/' "$config"
+sed -i 's/^hw.lcd.height=.*/hw.lcd.height=640/' "$config"
+sed -i 's/^hw.lcd.density=.*/hw.lcd.density=160/' "$config"
+touch "$ANDROID_AVD_HOME/android.avd/userdata-qemu.img"
+"$here/../src/avd-init" >/dev/null
+grep -qx "hw.lcd.width=1080" "$config"
+grep -qx "hw.lcd.height=1920" "$config"
+grep -qx "hw.lcd.density=420" "$config"
+[ -e "$ANDROID_AVD_HOME/android.avd/userdata-qemu.img" ]
+
 echo "avd-init tests passed"

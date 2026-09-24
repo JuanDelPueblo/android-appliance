@@ -32,17 +32,22 @@ The design uses native parts only:
 - **systemd** is the lifecycle manager. There is no custom daemon.
 - The emulator unit is in the `activating` state until Android reports
   `sys.boot_completed=1`. Thus the systemd state is the lifecycle state.
+  `androidctl start` queues the unit with `systemctl start --no-block`
+  and then waits independently, so Ctrl-C stops waiting without tearing
+  down an otherwise valid start. The unit keeps its `ExecStartPost`
+  boot wait, so `activating` still means starting.
 - **Suspend** uses the emulator console (`adb emu avd stop`). The guest
   RAM stays in memory and the vCPUs stop. **Resume** uses
   `adb emu avd start`.
 - **Stop** uses `adb emu kill`, the normal emulator shutdown path. It saves
-  the Quick Boot snapshot. systemd kills the process only if the stop does
-  not finish in 3 minutes.
+  the Quick Boot snapshot. `stop-hook` waits up to 90 seconds, then
+  returns so systemd can SIGTERM; the outer `TimeoutStopSec` is 3 minutes.
 - **Idle policy** is a timestamp file and a systemd timer. The timer is
   bound to the emulator unit, so nothing runs while Android is stopped.
-- **Display** is Xvnc (an X server with a VNC server), scrcpy, and noVNC
-  (websockify in inetd mode). A systemd socket on loopback starts the chain
-  at the first browser connection. The chain stops when the emulator stops.
+- **Display** is Xvnc at 1080x1920 (the device native size), scrcpy, and
+  noVNC (websockify in inetd mode). A systemd socket on loopback starts
+  the chain at the first browser connection. The chain stops when the
+  emulator stops.
 
 ## Ownership boundary
 
@@ -116,12 +121,12 @@ Requirements:
 | `memoryMiB` | `4096` | Guest RAM. |
 | `cores` | `4` | Guest CPU cores. |
 | `diskSize` | `32G` | Userdata size. It applies only when the AVD is created. |
-| `gpu` | `swiftshader` | Emulator `-gpu` mode. The default software renderer works on every headless host. Use `host` only with a usable host GPU and EGL. |
-| `display.enable` | `true` | Serve the browser display. |
+| `gpu` | `swiftshader` | Emulator `-gpu` mode. The default software renderer works on every headless host. `host` needs a usable GPU and EGL; it uses the appliance X server (`:57`), adds `render`/`video` groups, binds only `/tmp/.X11-unix`, and passes `-feature -Vulkan` to match the known-good Juno setup. |
+| `display.enable` | `true` | Serve the browser display at 1080x1920. |
 | `display.port` | `6090` | Loopback port of the noVNC page. |
 
-A change to `memoryMiB` or `cores` makes the next start a cold boot. The
-userdata stays.
+A change to `memoryMiB`, `cores`, or the fixed 1080x1920 display size makes
+the next start a cold boot. The userdata stays.
 
 The system image is Android 16 (API 36), Google APIs with Play Store,
 x86_64. Set `apiLevel` to pick another level for a new or adopted AVD.
@@ -137,6 +142,18 @@ existing AVD, or delete the AVD and let `avd-init` create a new one.
 avd-init: existing AVD 'android' uses 'system-images/android-36/...', but
 avd-init: services.android-appliance.apiLevel is 35 (...).
 avd-init: apiLevel does not upgrade existing AVDs; use the matching level or recreate the AVD.
+```
+
+`avd-init` also refuses a stale registry path. The emulator follows
+`path=` in `stateDir/avd/<name>.ini`; if that points outside the expected
+`stateDir/avd/<name>.avd` (for example after moving `stateDir`), the start
+stops instead of inspecting one AVD while launching another. Point
+`stateDir` at the live tree. A missing registry file is recreated.
+
+```text
+avd-init: registry '/var/lib/juno/android/avd/android.ini' points to '/srv/pool/vms/android/avd/android.avd',
+avd-init: but services.android-appliance.stateDir expects '/var/lib/juno/android/avd/android.avd'.
+avd-init: refusing to inspect one AVD while the emulator would launch another.
 ```
 
 ## Adopting an AVD from another appliance
@@ -246,8 +263,8 @@ The activity time is the modification time of `stateDir/last-activity`.
 
 ## Remote display
 
-The display serves only the device screen. There is no emulator window
-and no emulator tool panel.
+The display serves only the device screen at 1080x1920. There is no
+emulator window and no emulator tool panel.
 
 - URL: `http://127.0.0.1:6090/vnc.html?autoconnect=true&resize=scale`
   (`androidctl display` prints it).
@@ -336,12 +353,14 @@ journalctl -u android-appliance-scrcpy -u android-appliance-display -b
 |---|---|
 | `start` fails at once | Look for KVM errors in the log. Make sure that `/dev/kvm` exists. |
 | `start` waits a long time on the first run | The first boot is a cold boot that creates userdata. Wait up to 20 minutes on slow hosts. |
-| Every start is a cold boot | The snapshot did not save. Look for errors near `emu kill` in the log. A `memoryMiB` or `cores` change also causes one cold boot. |
-| `state=starting` does not change | Android did not finish its boot. Run `androidctl restart`. If that does not help, look at the emulator log. |
-| `device unauthorized` or `device offline` | The appliance uses its own adb server on port 5038 and its keys in `stateDir/home/.android`. Do not start a different adb server with the same port. Run `androidctl restart`. |
+| Every start is a cold boot | The snapshot did not save. Look for errors near `emu kill` in the log. A `memoryMiB`, `cores`, or display-size change also causes one cold boot. |
+| `state=starting` does not change | Android did not finish its boot. `start` waits with `--no-block`, so Ctrl-C only stops waiting. If the unit died, `start` reports it; otherwise run `androidctl restart`. Look at the emulator log. |
+| `device unauthorized` | The AVD trusts another adb key. `start` fails fast with this diagnostic. Copy the old key into `stateDir/home/.android/` (see adopting an AVD), then restart. The appliance uses its own adb server on port 5038; do not start another server with the same port. |
+| `device offline` for 120s | The guest is stuck. `start` reports it; look at the emulator log and restart. A brief offline during early boot is normal. |
+| `refusing to inspect one AVD` | `stateDir/avd/<name>.ini` points outside `stateDir`. Point `stateDir` at the live tree; the AVD is untouched. |
 | `Interactive authentication required` | The command ran as a user other than `user`. Run it as `user` or as root. |
 | Black browser display | Android is starting, or scrcpy restarts. Look at the scrcpy log. |
-| `-gpu host` fails | Use the default `swiftshader`, or give the host a working GPU and EGL. |
+| `-gpu host` fails with EGL/display errors | Host mode needs the appliance X server (`:57`), `render`/`video` groups, and `-feature -Vulkan`. The module sets this; do not override with plain `-gpu host` and no display. Software `swiftshader` needs no display. |
 
 To run adb directly for debugging, run it as `user` with the environment
 of the emulator unit (`HOME`, `ANDROID_ADB_SERVER_PORT`, `ANDROID_HOME`):
@@ -365,10 +384,17 @@ hermes plugins doctor . --ci       # Hermes runtime contract checks
 
 - ShellCheck on the scripts.
 - Lifecycle tests for `androidctl` with fake `systemctl`, `adb` and
-  `xprintidle` commands. They need no KVM.
+  `xprintidle` commands, including `--no-block` start, unit-dies,
+  unauthorized, offline-timeout, and bounded stop-hook cases. They need
+  no KVM.
+- `avd-init` tests, including stale registry-path refusal, registry
+  recreation, and native-resolution enforcement.
 - Python tests for the Hermes tools and the dashboard backend.
-- An evaluation of a NixOS system with the module. It asserts that the
-  emulator is not part of a boot target.
+- An evaluation of NixOS systems with the module, for both software and
+  host GPU. It asserts that the emulator is not part of a boot target,
+  that host mode has `DISPLAY`, Xvnc ordering, the X socket bind,
+  `render`/`video` groups and `-feature -Vulkan`, that software mode has
+  none of those, and that the display is 1080x1920.
 - nixfmt.
 
 The integration test boots Android in a VM and checks these items: Android

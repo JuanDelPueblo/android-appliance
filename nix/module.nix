@@ -19,9 +19,10 @@ let
   xDisplay = ":57";
   runDir = "/run/${prefix}";
   vncSocket = "${runDir}/vnc.sock";
-  # The X screen has the same 9:16 shape as the device, so scrcpy fills it.
-  screenWidth = 720;
-  screenHeight = 1280;
+  # The X screen matches the device native size, so scrcpy fills it with no
+  # downscale. The AVD is 1080x1920 at 420 dpi.
+  screenWidth = 1080;
+  screenHeight = 1920;
 
   # Enabling the module accepts the Android SDK license for these packages.
   androidSdk =
@@ -228,56 +229,75 @@ in
 
         # The emulator is never part of a boot target. androidctl, the display
         # socket or an operator starts it on demand.
-        systemd.services."${prefix}-emulator" = {
-          description = "Android Emulator appliance";
-          after = [ "network.target" ];
-          wants = [ "${prefix}-idle.timer" ];
-          unitConfig.RequiresMountsFor = [ cfg.stateDir ];
-          path = [ pkgs.coreutils ];
-          environment = androidEnv // {
-            AVD_NAME = cfg.avdName;
-            AVD_API = toString cfg.apiLevel;
-            AVD_TAG = imageTag;
-            AVD_SYSTEM_IMAGE = "system-images/android-${toString cfg.apiLevel}/${imageTag}/x86_64";
-            AVD_RAM_MIB = toString cfg.memoryMiB;
-            AVD_CORES = toString cfg.cores;
-            AVD_DISK_SIZE = cfg.diskSize;
+        systemd.services."${prefix}-emulator" =
+          let
+            hostGpu = cfg.gpu == "host";
+          in
+          {
+            description = "Android Emulator appliance";
+            after = [ "network.target" ] ++ lib.optionals hostGpu [ "${prefix}-xvnc.service" ];
+            requires = lib.optionals hostGpu [ "${prefix}-xvnc.service" ];
+            wants = [ "${prefix}-idle.timer" ];
+            unitConfig.RequiresMountsFor = [ cfg.stateDir ];
+            path = [ pkgs.coreutils ];
+            environment =
+              androidEnv
+              // {
+                AVD_NAME = cfg.avdName;
+                AVD_API = toString cfg.apiLevel;
+                AVD_TAG = imageTag;
+                AVD_SYSTEM_IMAGE = "system-images/android-${toString cfg.apiLevel}/${imageTag}/x86_64";
+                AVD_RAM_MIB = toString cfg.memoryMiB;
+                AVD_CORES = toString cfg.cores;
+                AVD_DISK_SIZE = cfg.diskSize;
+              }
+              # Host rendering needs an X display for EGL/GL. Software
+              # renderers work headless and get no display dependency.
+              // lib.optionalAttrs hostGpu { DISPLAY = xDisplay; };
+            serviceConfig = commonService // {
+              Type = "simple";
+              SupplementaryGroups = [
+                "kvm"
+              ]
+              ++ lib.optionals hostGpu [
+                "render"
+                "video"
+              ];
+              PrivateTmp = true;
+              # Expose only the X socket directory, not the whole host /tmp.
+              # The abstract X socket is also shared, but the filesystem
+              # socket needs this bind when PrivateTmp isolates /tmp.
+              BindPaths = lib.optionals hostGpu [ "/tmp/.X11-unix" ];
+              WorkingDirectory = cfg.stateDir;
+              ExecStartPre = "${androidctl}/bin/android-avd-init";
+              ExecStart =
+                lib.escapeShellArgs [
+                  "${sdkRoot}/emulator/emulator"
+                  "-avd"
+                  cfg.avdName
+                  "-port"
+                  (toString consolePort)
+                  "-no-window"
+                  "-no-audio"
+                  "-no-boot-anim"
+                  "-no-metrics"
+                  "-gpu"
+                  cfg.gpu
+                ]
+                # The old known-good Juno setup used -feature -Vulkan with
+                # host rendering; plain -gpu host tries Vulkan and fails
+                # without a display. Keep Vulkan off for host mode.
+                + lib.optionalString hostGpu " -feature -Vulkan";
+              # Wait for Android boot completion, so "activating" means "starting".
+              ExecStartPost = "${ctl} boot-hook";
+              # `adb emu kill` saves the Quick Boot snapshot. stop-hook waits
+              # up to 90s; systemd sends SIGTERM/SIGKILL after TimeoutStopSec.
+              ExecStop = "${ctl} stop-hook";
+              TimeoutStartSec = "20min";
+              TimeoutStopSec = "3min";
+              Restart = "no";
+            };
           };
-          serviceConfig = commonService // {
-            Type = "simple";
-            SupplementaryGroups = [
-              "kvm"
-            ]
-            ++ lib.optionals (cfg.gpu == "host") [
-              "render"
-              "video"
-            ];
-            PrivateTmp = true;
-            WorkingDirectory = cfg.stateDir;
-            ExecStartPre = "${androidctl}/bin/android-avd-init";
-            ExecStart = lib.escapeShellArgs [
-              "${sdkRoot}/emulator/emulator"
-              "-avd"
-              cfg.avdName
-              "-port"
-              (toString consolePort)
-              "-no-window"
-              "-no-audio"
-              "-no-boot-anim"
-              "-no-metrics"
-              "-gpu"
-              cfg.gpu
-            ];
-            # Wait for Android boot completion, so "activating" means "starting".
-            ExecStartPost = "${ctl} boot-hook";
-            # `adb emu kill` saves the Quick Boot snapshot. systemd sends
-            # SIGTERM and then SIGKILL only if that does not finish in time.
-            ExecStop = "${ctl} stop-hook";
-            TimeoutStartSec = "20min";
-            TimeoutStopSec = "3min";
-            Restart = "no";
-          };
-        };
 
         # The timer runs only while the emulator unit is active.
         systemd.timers."${prefix}-idle" = {

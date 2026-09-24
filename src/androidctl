@@ -14,6 +14,7 @@ serial=${ANDROID_APPLIANCE_SERIAL:-emulator-5554}
 suspend_after=${ANDROID_APPLIANCE_IDLE_SUSPEND:-600}
 stop_after=${ANDROID_APPLIANCE_IDLE_STOP:-3600}
 boot_timeout=${ANDROID_APPLIANCE_BOOT_TIMEOUT:-900}
+stop_hook_timeout=${ANDROID_APPLIANCE_STOP_HOOK_TIMEOUT:-90}
 display_url=${ANDROID_APPLIANCE_DISPLAY_URL:-}
 x_display=${ANDROID_APPLIANCE_X_DISPLAY:-}
 xprintidle_bin=${ANDROID_APPLIANCE_XPRINTIDLE:-xprintidle}
@@ -132,20 +133,60 @@ idle_seconds() {
   echo "$idle"
 }
 
+adb_state() {
+  # Prints device|offline|unauthorized|unknown, or empty when no device yet.
+  probe get-state 2>/dev/null | tr -d '\r' || true
+}
+
 wait_boot() {
-  local deadline=$(($(now) + boot_timeout))
+  local deadline=$(($(now) + boot_timeout)) state offline_since=0
   while ! boot_completed; do
     case "$(unit_state)" in
-      active | activating) ;;
-      *) die "the emulator unit stopped during boot" ;;
+      # deactivating occurs when a previous stop (for example idle hibernate)
+      # still saves its snapshot while a new start is queued.
+      active | activating | deactivating) ;;
+      *) die "the emulator unit stopped during boot; see: journalctl -u $unit" ;;
     esac
     if vm_paused; then
       die "android is suspended"
     fi
+    state=$(adb_state)
+    case "$state" in
+      unauthorized)
+        die "device unauthorized: the AVD trusts another adb key; copy the old key into $state_dir/home/.android/ then restart"
+        ;;
+      offline)
+        # Early boot can show offline briefly; fail only when it sticks.
+        if [ "$offline_since" = 0 ]; then offline_since=$(now); fi
+        if [ $(($(now) - offline_since)) -ge 120 ]; then
+          die "device offline for 120s; see: journalctl -u $unit"
+        fi
+        ;;
+      *) offline_since=0 ;;
+    esac
     if [ "$(now)" -ge "$deadline" ]; then
-      die "android did not finish booting in ${boot_timeout}s"
+      state=$(adb_state)
+      die "android did not finish booting in ${boot_timeout}s (adb:${state:-none}); see: journalctl -u $unit"
     fi
     sleep 2
+  done
+}
+
+# After boot completes, ExecStartPost (boot-hook) still finishes its setup
+# before systemd reports active. Wait briefly so `start` returns with the
+# unit active, matching the old blocking start. Ctrl-C only stops waiting.
+# Not used by boot-hook itself, which must exit for the unit to activate.
+wait_active() {
+  local deadline=$(($(now) + 60))
+  while [ "$(unit_state)" != active ]; do
+    case "$(unit_state)" in
+      activating | deactivating) ;;
+      *) die "the emulator unit stopped during boot; see: journalctl -u $unit" ;;
+    esac
+    if [ "$(now)" -ge "$deadline" ]; then
+      die "the emulator unit did not become active; see: journalctl -u $unit"
+    fi
+    sleep 1
   done
 }
 
@@ -171,15 +212,23 @@ cmd_start() {
   touch_activity
   case "$(current_state)" in
     running) ;;
-    suspended) resume_vm ;;
+    suspended)
+      resume_vm
+      # Wait until the guest answers; otherwise the following adb command
+      # (which has no timeout) could hang while Android wakes.
+      wait_boot
+      ;;
     *)
       if [ "$no_wait" = --no-wait ]; then
         systemctl start --no-block "$unit"
         return
       fi
-      # Blocks until ExecStartPost reports boot completion.
-      systemctl start "$unit" || die "the emulator unit failed to start; see: journalctl -u $unit"
+      # Queue the start without tying this terminal to ExecStartPost, then
+      # wait independently. Ctrl-C stops waiting, not the emulator start;
+      # systemd stays activating until boot-hook reports boot completion.
+      systemctl start --no-block "$unit" || die "the emulator unit failed to start; see: journalctl -u $unit"
       wait_boot
+      wait_active
       ;;
   esac
 }
@@ -189,8 +238,9 @@ cmd_restart() {
   if [ "${1:-}" = --no-wait ]; then
     systemctl restart --no-block "$unit"
   else
-    systemctl restart "$unit" || die "the emulator unit failed to start; see: journalctl -u $unit"
+    systemctl restart --no-block "$unit" || die "the emulator unit failed to start; see: journalctl -u $unit"
     wait_boot
+    wait_active
   fi
 }
 
@@ -210,7 +260,10 @@ cmd_suspend() {
 cmd_resume() {
   touch_activity
   case "$(current_state)" in
-    suspended) resume_vm ;;
+    suspended)
+      resume_vm
+      wait_boot
+      ;;
     running) ;;
     *) die "android is not suspended" ;;
   esac
@@ -218,7 +271,10 @@ cmd_resume() {
 
 cmd_wait() {
   case "$(unit_state)" in
-    active | activating) wait_boot ;;
+    active | activating)
+      wait_boot
+      wait_active
+      ;;
     *) die "android is stopped" ;;
   esac
 }
@@ -234,14 +290,18 @@ cmd_boot_hook() {
 }
 
 # Internal: ExecStop of the emulator unit. `emu kill` is the normal emulator
-# shutdown path and saves the Quick Boot snapshot. systemd kills the process
-# after TimeoutStopSec if this does not work.
+# shutdown path and saves the Quick Boot snapshot. Wait boundedly so a stuck
+# renderer does not hold shutdown for the full TimeoutStopSec; systemd sends
+# SIGTERM/SIGKILL after this returns.
 cmd_stop_hook() {
   probe emu avd start >/dev/null || true
   probe emu kill >/dev/null || return 0
-  local pid=${MAINPID:-}
+  local pid=${MAINPID:-} deadline=$(($(now) + stop_hook_timeout))
   [ -n "$pid" ] || return 0
   while kill -0 "$pid" 2>/dev/null; do
+    if [ "$(now)" -ge "$deadline" ]; then
+      return 0
+    fi
     sleep 1
   done
 }

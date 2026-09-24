@@ -11,6 +11,12 @@ set -euo pipefail
 
 avd_dir=$ANDROID_AVD_HOME/$AVD_NAME.avd
 config=$avd_dir/config.ini
+registry=$ANDROID_AVD_HOME/$AVD_NAME.ini
+
+canon() {
+  # Canonicalize without requiring existence. realpath comes from coreutils.
+  realpath -m "$1" 2>/dev/null || printf '%s' "$1"
+}
 
 set_key() {
   local key=$1 value=$2 current
@@ -31,6 +37,22 @@ read_key() {
 }
 
 mkdir -p "$ANDROID_AVD_HOME" "$HOME/.android"
+
+# The emulator follows path= in the registry .ini, not the directory we
+# inspect below. A stale absolute path (for example after moving stateDir)
+# would make avd-init validate one AVD while the emulator launches another,
+# potentially with a read-only sandbox. Refuse instead of following it.
+if [ -f "$registry" ]; then
+  reg_path=$(sed -n 's/^path=//p' "$registry" | head -n 1)
+  if [ -n "$reg_path" ] && [ "$(canon "$reg_path")" != "$(canon "$avd_dir")" ]; then
+    echo "avd-init: registry '$registry' points to '$reg_path'," >&2
+    echo "avd-init: but services.android-appliance.stateDir expects '$avd_dir'." >&2
+    echo "avd-init: refusing to inspect one AVD while the emulator would launch another." >&2
+    echo "avd-init: point stateDir at the live tree (for this path: the parent of '$(dirname "$reg_path")')," >&2
+    echo "avd-init: or remove the stale registry entry; not touching the AVD." >&2
+    exit 1
+  fi
+fi
 
 if [ ! -f "$config" ]; then
   echo "avd-init: creating AVD '$AVD_NAME' in $avd_dir"
@@ -82,12 +104,28 @@ else
       ;;
   esac
   echo "avd-init: AVD '$AVD_NAME' exists; keeping userdata"
+  # The registry must exist and point here; recreate it if it is missing.
+  # A mismatched path was already refused above, so writing the expected
+  # path is safe and repairs a deleted registry file.
+  if [ ! -f "$registry" ]; then
+    cat >"$registry" <<EOF
+avd.ini.encoding=UTF-8
+path=$avd_dir
+path.rel=avd/$AVD_NAME.avd
+target=android-$AVD_API
+EOF
+  fi
 fi
 
 # A changed value makes the emulator cold boot once instead of restoring the
 # Quick Boot snapshot. Userdata is kept.
 set_key hw.ramSize "$AVD_RAM_MIB"
 set_key hw.cpu.ncore "$AVD_CORES"
+# The browser display is 1080x1920, so keep adopted AVDs at the same native
+# size instead of a stale low resolution. Userdata is kept; one cold boot.
+set_key hw.lcd.width 1080
+set_key hw.lcd.height 1920
+set_key hw.lcd.density 420
 
 # Without a window there is no Quick Boot dialog, and the emulator does not
 # save the snapshot on exit unless this choice is set.
