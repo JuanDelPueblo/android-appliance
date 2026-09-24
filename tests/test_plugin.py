@@ -19,7 +19,7 @@ echo "$@" >> "$FAKE_LOG"
 case "$1" in
   status) echo "state=running boot_completed=1 idle_seconds=7" ;;
   screenshot) echo "${2:-/tmp/shot.png}" ;;
-  display) echo "http://127.0.0.1:6080/vnc.html" ;;
+  display) echo "http://127.0.0.1:6090/vnc.html" ;;
   suspend) echo "androidctl: android is not running" >&2; exit 1 ;;
 esac
 """
@@ -144,7 +144,7 @@ class DashboardTests(FakeAndroidctl):
     def test_status(self):
         data = self.client.get("/api/plugins/android-appliance/status").json()
         self.assertEqual(data["state"], "running")
-        self.assertEqual(data["display_url"], "http://127.0.0.1:6080/vnc.html")
+        self.assertEqual(data["display_url"], "http://127.0.0.1:6090/vnc.html")
 
     def test_start_does_not_block(self):
         data = self.client.post("/api/plugins/android-appliance/actions/start").json()

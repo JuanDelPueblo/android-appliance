@@ -166,7 +166,7 @@ in
 
       port = mkOption {
         type = types.port;
-        default = 6080;
+        default = 6090;
         description = "Loopback port of the noVNC web page.";
       };
     };
