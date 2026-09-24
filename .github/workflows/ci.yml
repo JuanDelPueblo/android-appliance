@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31
-      - run: nix flake check -L
+      - run: nix flake check
 
   hermes-plugin:
     runs-on: ubuntu-latest
@@ -20,10 +20,26 @@ jobs:
       HERMES_REF: v2026.9.14
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: plugin
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ env.HERMES_REF }}
+          path: hermes
       - uses: astral-sh/setup-uv@v6
+      # Hermes does not build wheels, so run it from a synced checkout.
       - name: Validate the plugin with Hermes
+        working-directory: hermes
         run: |
+          uv sync --python 3.13
           export HERMES_HOME="$(mktemp -d)"
-          hermes="uvx --python 3.13 --from git+https://github.com/NousResearch/hermes-agent@${HERMES_REF} hermes"
-          $hermes plugins validate .
-          $hermes plugins doctor . --ci
+          uv run --no-sync hermes plugins validate ../plugin
+          uv run --no-sync hermes plugins doctor ../plugin --ci
+      # The install scan blocks community plugins with high findings.
+      - name: Install the plugin with Hermes
+        working-directory: hermes
+        run: |
+          export HOME="$(mktemp -d)" HERMES_HOME="$(mktemp -d)"
+          uv run --no-sync hermes plugins install "file://$GITHUB_WORKSPACE/plugin" --enable < /dev/null
+          test -f "$HERMES_HOME/plugins/android-appliance/plugin.yaml"

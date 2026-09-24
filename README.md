@@ -270,8 +270,8 @@ Android.
   supplementary group.
 - A polkit rule lets `user` start, stop and restart only
   `android-appliance-emulator.service`. The user gets no other systemd
-  permission and no sudo rule. This works in services with
-  `NoNewPrivileges=yes`, because polkit uses D-Bus and not setuid.
+  permission. androidctl sends these requests to systemd over D-Bus, so
+  it also works from a hardened service such as the Hermes gateway.
 - The display chain starts through socket activation and unit dependencies,
   so it needs no permission.
 - The noVNC page and the VNC socket are local only. The VNC socket has mode
@@ -313,14 +313,11 @@ journalctl -u android-appliance-scrcpy -u android-appliance-display -b
 | Black browser display | Android is starting, or scrcpy restarts. Look at the scrcpy log. |
 | `-gpu host` fails | Use the default `swiftshader_indirect`, or give the host a working GPU and EGL. |
 
-To run adb directly for debugging, use the same environment as
-androidctl:
+To run adb directly for debugging, run it as `user` with the environment
+of the emulator unit (`HOME`, `ANDROID_ADB_SERVER_PORT`, `ANDROID_HOME`):
 
 ```bash
-# Show ANDROID_HOME and the other values of the unit environment.
 systemctl show -p Environment android-appliance-emulator
-sudo -u <user> env HOME=<stateDir>/home ANDROID_ADB_SERVER_PORT=5038 \
-  <ANDROID_HOME>/platform-tools/adb devices
 ```
 
 For device commands, use `androidctl shell <command>`.
