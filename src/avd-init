@@ -14,17 +14,20 @@ config=$avd_dir/config.ini
 
 set_key() {
   local key=$1 value=$2 current
-  # The emulator rewrites config.ini as "key = value" with spaces. Accept
-  # both forms so a managed key never becomes a duplicate line.
-  current=$(sed -n "s/^$key *= *//p" "$config")
   # The emulator can write sizes back with a unit, for example 2048M.
   # Do not touch an equal value: a config change forces a cold boot.
+  current=$(read_key "$key")
   [ "${current%%[MG]*}" = "$value" ] && return
   if [ -n "$current" ]; then
     sed -i "s|^$key *= *.*|$key=$value|" "$config"
   else
     echo "$key=$value" >>"$config"
   fi
+}
+
+read_key() {
+  # The emulator rewrites config.ini as "key = value" with spaces.
+  sed -n "s/^$1 *= *//p" "$config" | head -n 1
 }
 
 mkdir -p "$ANDROID_AVD_HOME" "$HOME/.android"
@@ -64,6 +67,20 @@ hw.camera.front=none
 showDeviceFrame=no
 EOF
 else
+  # Do not modify an existing AVD. Swapping the OS under existing userdata
+  # would be unsafe, so validate the image and stop on a mismatch instead.
+  # The API level in the system image path is the authoritative one.
+  current_image=$(read_key image.sysdir.1)
+  case "$current_image" in
+    "system-images/android-$AVD_API/$AVD_TAG/x86_64/" | "system-images/android-$AVD_API/$AVD_TAG/x86_64")
+      ;;
+    *)
+      echo "avd-init: existing AVD '$AVD_NAME' uses '${current_image%/}', but" >&2
+      echo "avd-init: services.android-appliance.apiLevel is $AVD_API ($AVD_SYSTEM_IMAGE/)." >&2
+      echo "avd-init: apiLevel does not upgrade existing AVDs; use the matching level or recreate the AVD." >&2
+      exit 1
+      ;;
+  esac
   echo "avd-init: AVD '$AVD_NAME' exists; keeping userdata"
 fi
 

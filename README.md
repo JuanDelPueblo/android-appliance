@@ -124,8 +124,36 @@ A change to `memoryMiB` or `cores` makes the next start a cold boot. The
 userdata stays.
 
 The system image is Android 16 (API 36), Google APIs with Play Store,
-x86_64. Set `apiLevel` to pick another level. The screen is 1080x1920 at
-420 dpi.
+x86_64. Set `apiLevel` to pick another level for a new or adopted AVD.
+The screen is 1080x1920 at 420 dpi.
+
+`apiLevel` does not upgrade an existing AVD. If `stateDir/avd` already
+holds an AVD, `avd-init` checks its system image against the option. A
+mismatch stops the start with an explicit error, and does not touch the
+AVD. To change the level, either set `apiLevel` to the level of the
+existing AVD, or delete the AVD and let `avd-init` create a new one.
+
+```text
+avd-init: existing AVD 'android' uses 'system-images/android-36/...', but
+avd-init: services.android-appliance.apiLevel is 35 (...).
+avd-init: apiLevel does not upgrade existing AVDs; use the matching level or recreate the AVD.
+```
+
+## Adopting an AVD from another appliance
+
+An AVD trusts the adb host key that created it. The old Juno service put
+that key in `ANDROID_USER_HOME=/var/lib/juno/android/user-home`, while
+this module uses `stateDir/home/.android`. To adopt old userdata, copy
+the key before the first start:
+
+1. Stop the old service.
+2. Copy the key files:
+   `cp /var/lib/juno/android/user-home/.android/adbkey* <stateDir>/home/.android/`
+3. Set `apiLevel` to the level of the old AVD. The start then adopts the
+   AVD or refuses on a mismatch.
+4. Start Android: `androidctl start`.
+
+A missing key makes the guest answer `device unauthorized` on first boot.
 
 ## Initial AVD creation
 

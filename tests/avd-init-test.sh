@@ -32,4 +32,20 @@ grep -qx "hw.ramSize=3072" "$config"
 [ "$(grep -c '^hw.ramSize' "$config")" = 1 ]
 grep -qx "hw.cpu.ncore=4" "$config"
 [ "$(grep -c '^hw.cpu.ncore' "$config")" = 1 ]
+
+# An existing AVD of another API level is refused, not modified.
+before=$(cat "$config")
+AVD_API=35 AVD_SYSTEM_IMAGE=system-images/android-35/google_apis_playstore/x86_64 \
+  "$here/../src/avd-init" >"$tmp/out" 2>&1 && {
+  echo "expected a refusal for the wrong apiLevel"
+  exit 1
+}
+grep -q "Existing AVD uses android-36\|existing AVD 'android' uses" "$tmp/out"
+grep -q "apiLevel does not upgrade existing AVDs" "$tmp/out"
+[ "$(cat "$config")" = "$before" ]
+
+# The matching API level is adopted unchanged.
+AVD_API=36 "$here/../src/avd-init" >"$tmp/out" 2>&1
+grep -q "keeping userdata" "$tmp/out"
+
 echo "avd-init tests passed"
