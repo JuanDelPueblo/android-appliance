@@ -8,6 +8,7 @@ let
   src = lib.cleanSource ../.;
 
   # A minimal system that enables the module, to check that it evaluates.
+  apiLevel = 36;
   system = nixpkgs.lib.nixosSystem {
     system = "x86_64-linux";
     modules = [
@@ -24,6 +25,7 @@ let
           enable = true;
           user = "tony";
           group = "users";
+          inherit apiLevel;
           stateDir = "/var/lib/juno/android";
         };
         users.users.tony = {
@@ -97,6 +99,12 @@ in
       !(units.android-appliance-emulator ? wantedBy) || units.android-appliance-emulator.wantedBy == [ ];
     assert !(builtins.elem "android-appliance-emulator.service" bootUnits);
     assert units.android-appliance-emulator.serviceConfig.User == "tony";
+    # apiLevel must reach both the system image path and avd-init.
+    assert
+      units.android-appliance-emulator.environment.AVD_API == toString apiLevel
+      &&
+        units.android-appliance-emulator.environment.AVD_SYSTEM_IMAGE
+        == "system-images/android-${toString apiLevel}/google_apis_playstore/x86_64";
     pkgs.writeText "module-eval" (
       builtins.unsafeDiscardStringContext system.config.system.build.toplevel.drvPath
     );

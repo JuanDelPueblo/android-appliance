@@ -12,7 +12,6 @@ let
   emulatorUnit = "${prefix}-emulator.service";
 
   # Fixed internal values. Callers use androidctl and never see them.
-  apiLevel = "36";
   imageTag = "google_apis_playstore";
   consolePort = 5554;
   serial = "emulator-${toString consolePort}";
@@ -27,7 +26,7 @@ let
   # Enabling the module accepts the Android SDK license for these packages.
   androidSdk =
     ((pkgs.androidenv.override { licenseAccepted = true; }).composeAndroidPackages {
-      platformVersions = [ apiLevel ];
+      platformVersions = [ (toString cfg.apiLevel) ];
       includeEmulator = true;
       includeSystemImages = true;
       systemImageTypes = [ imageTag ];
@@ -118,6 +117,17 @@ in
       type = types.str;
       default = "android";
       description = "Name of the AVD in the state directory.";
+    };
+
+    apiLevel = mkOption {
+      type = types.int;
+      default = 36;
+      example = 34;
+      description = ''
+        Android API level of the system image. The Google APIs Play Store
+        image must exist for this level and x86_64. A change needs a new
+        image, so the first start after it downloads one.
+      '';
     };
 
     idleSuspendMinutes = mkOption {
@@ -226,9 +236,9 @@ in
           path = [ pkgs.coreutils ];
           environment = androidEnv // {
             AVD_NAME = cfg.avdName;
-            AVD_API = apiLevel;
+            AVD_API = toString cfg.apiLevel;
             AVD_TAG = imageTag;
-            AVD_SYSTEM_IMAGE = "system-images/android-${apiLevel}/${imageTag}/x86_64";
+            AVD_SYSTEM_IMAGE = "system-images/android-${toString cfg.apiLevel}/${imageTag}/x86_64";
             AVD_RAM_MIB = toString cfg.memoryMiB;
             AVD_CORES = toString cfg.cores;
             AVD_DISK_SIZE = cfg.diskSize;

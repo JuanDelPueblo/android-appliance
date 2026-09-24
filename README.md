@@ -110,6 +110,7 @@ Requirements:
 | `group` | `android-appliance` | Primary group of the appliance processes and state. |
 | `stateDir` | `/var/lib/android-appliance` | Persistent appliance directory. |
 | `avdName` | `android` | AVD name. |
+| `apiLevel` | `36` | Android API level of the system image. |
 | `idleSuspendMinutes` | `10` | Pause Android after this idle time. |
 | `idleHibernateMinutes` | `60` | Stop Android after this idle time, counted from the last use. |
 | `memoryMiB` | `4096` | Guest RAM. |
@@ -123,7 +124,8 @@ A change to `memoryMiB` or `cores` makes the next start a cold boot. The
 userdata stays.
 
 The system image is Android 16 (API 36), Google APIs with Play Store,
-x86_64. The screen is 1080x1920 at 420 dpi.
+x86_64. Set `apiLevel` to pick another level. The screen is 1080x1920 at
+420 dpi.
 
 ## Initial AVD creation
 
