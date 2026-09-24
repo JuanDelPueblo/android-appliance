@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  flake-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - run: nix flake check -L
+
+  hermes-plugin:
+    runs-on: ubuntu-latest
+    env:
+      # Keep in step with the Hermes release that runs the plugin.
+      HERMES_REF: v2026.9.14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Validate the plugin with Hermes
+        run: |
+          export HERMES_HOME="$(mktemp -d)"
+          hermes="uvx --python 3.13 --from git+https://github.com/NousResearch/hermes-agent@${HERMES_REF} hermes"
+          $hermes plugins validate .
+          $hermes plugins doctor . --ci
