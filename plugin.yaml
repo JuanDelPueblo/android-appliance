@@ -1,0 +1,30 @@
+name: android-appliance
+version: 0.1.0
+manifest_version: 2
+description: "Operate the on-demand Android Emulator appliance through androidctl: lifecycle, screenshots, UI dumps and input."
+author: JuanDelPueblo
+license: MIT
+homepage: https://github.com/JuanDelPueblo/android-appliance
+tags: [android, emulator, automation]
+requires_hermes: ">=0.21"
+platforms:
+  - linux
+provides_tools:
+  - android_status
+  - android_start
+  - android_stop
+  - android_screenshot
+  - android_ui
+  - android_tap
+  - android_swipe
+  - android_text
+  - android_key
+config_schema:
+  androidctl:
+    type: str
+    default: ""
+    description: "Path to androidctl. Empty means PATH, then /run/current-system/sw/bin/androidctl."
+  display_url:
+    type: str
+    default: ""
+    description: "Browser display URL for the dashboard. Empty means the local URL from `androidctl display`."

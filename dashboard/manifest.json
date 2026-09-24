@@ -1,0 +1,10 @@
+{
+  "name": "android-appliance",
+  "label": "Android",
+  "description": "Lifecycle controls and browser display for the Android appliance.",
+  "icon": "Activity",
+  "version": "0.1.0",
+  "tab": { "path": "/android", "position": "end" },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}
