@@ -80,6 +80,9 @@ let
     ReadWritePaths = [
       cfg.stateDir
       runDir
+      # Xvnc writes its lock file and X socket under /tmp. The emulator unit
+      # replaces /tmp with PrivateTmp, so this only affects the display units.
+      "/tmp"
     ];
   };
 in

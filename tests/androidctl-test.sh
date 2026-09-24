@@ -146,6 +146,12 @@ t_screenshot() {
   [ "$(cat "$FAKE/shot.png")" = PNGDATA ]
 }
 
+t_ui_retries_after_null_root() {
+  running
+  [[ "$(ctl ui)" == *"<hierarchy"* ]]
+  [ "$(grep -c 'uiautomator dump' "$FAKE/calls")" = 2 ]
+}
+
 t_text_is_quoted() {
   running
   ctl text "it's a test"

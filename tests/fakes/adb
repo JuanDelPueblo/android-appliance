@@ -16,5 +16,18 @@ case "$*" in
     cat "$FAKE/boot"
     ;;
   "exec-out screencap -p") printf 'PNGDATA' ;;
+  "shell uiautomator dump "*)
+    # Fail once with a null root node, as a fresh boot can do.
+    if [ -e "$FAKE/ui_ready" ]; then
+      printf '<hierarchy rotation="0"/>' >"$FAKE/window_dump.xml"
+    else
+      : >"$FAKE/window_dump.xml"
+      touch "$FAKE/ui_ready"
+      echo "ERROR: null root node returned by UiTestAutomationBridge."
+    fi
+    ;;
+  "exec-out cat /data/local/tmp/window_dump.xml")
+    cat "$FAKE/window_dump.xml" 2>/dev/null || true
+    ;;
   *) ;;
 esac

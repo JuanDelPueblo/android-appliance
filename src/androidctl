@@ -73,11 +73,20 @@ adb() { "$adb_bin" -s "$serial" "$@"; }
 # Probes must never hang: a paused guest does not answer adb shell.
 probe() { timeout 10 "$adb_bin" -s "$serial" "$@" 2>/dev/null; }
 
+# Grep the probe output without a pipe. `grep -q` closes the pipe on the first
+# match, and pipefail then reports the producer's SIGPIPE as a failure.
+probe_has() {
+  local pattern=$1 out
+  shift
+  out=$(probe "$@") || true
+  grep -q "$pattern" <<<"$out"
+}
+
 unit_state() { systemctl is-active "$unit" 2>/dev/null || true; }
 
 # The console runs in the emulator host process, so it answers while the
 # guest is paused. It prints "virtual device is running|stopped".
-vm_paused() { probe emu avd status | grep -q 'is stopped'; }
+vm_paused() { probe_has 'is stopped' emu avd status; }
 
 boot_completed() { [ "$(probe shell getprop sys.boot_completed | tr -d '\r')" = 1 ]; }
 
@@ -141,12 +150,12 @@ wait_boot() {
 }
 
 resume_vm() {
-  probe emu avd start | grep -q OK || die "the emulator did not accept resume"
+  probe_has OK emu avd start || die "the emulator did not accept resume"
   rm -f "$suspended_file"
 }
 
 suspend_vm() {
-  probe emu avd stop | grep -q OK || die "the emulator did not accept suspend"
+  probe_has OK emu avd stop || die "the emulator did not accept suspend"
   touch "$suspended_file"
 }
 
@@ -312,9 +321,17 @@ case "$cmd" in
     ;;
   ui)
     ensure_running
-    adb shell uiautomator dump /data/local/tmp/window_dump.xml >/dev/null
-    adb exec-out cat /data/local/tmp/window_dump.xml
-    echo
+    dump=/data/local/tmp/window_dump.xml
+    # A fresh boot can answer "null root node" once before a window exists.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      adb shell uiautomator dump "$dump" >/dev/null 2>&1 || true
+      out=$(adb exec-out cat "$dump" 2>/dev/null || true)
+      case "$out" in
+        *"<hierarchy"*) break ;;
+      esac
+      sleep 1
+    done
+    printf '%s\n' "$out"
     ;;
   tap)
     need 2 "$@"

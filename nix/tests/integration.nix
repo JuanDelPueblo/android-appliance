@@ -93,7 +93,8 @@ testPkgs.testers.runNixOSTest {
         print(f"cold boot took {time.monotonic() - start:.0f}s")
         assert status().startswith("state=running boot_completed=1"), status()
         machine.succeed(f"test -f {state_dir}/avd/android.ini")
-        machine.succeed(f"grep -q '^hw.ramSize=2048' {state_dir}/avd/android.avd/config.ini")
+        print(machine.succeed(f"cat {state_dir}/avd/android.avd/config.ini"))
+        machine.succeed(f"grep -Eq '^hw.ramSize ?= ?2048' {state_dir}/avd/android.avd/config.ini")
 
     with subtest("adb commands and screenshot"):
         assert tony("androidctl shell getprop ro.build.version.sdk") == "36"
@@ -128,7 +129,9 @@ testPkgs.testers.runNixOSTest {
     with subtest("quick boot stop and restore"):
         tony("androidctl stop", timeout=300)
         machine.fail(f"systemctl is-active {emulator}")
-        machine.fail("pgrep -f qemu-system-x86_64")
+        # The emulator waits up to 20s for a graceful shutdown. The bracketed
+        # pattern stops pgrep from matching the test command itself.
+        machine.wait_until_fails("pgrep -f '[q]emu-system-x86_64'", timeout=120)
         assert status().startswith("state=stopped"), status()
         machine.succeed(f"test -d {state_dir}/avd/android.avd/snapshots/default_boot")
         start = time.monotonic()
@@ -145,11 +148,13 @@ testPkgs.testers.runNixOSTest {
     with subtest("idle hibernate"):
         set_idle(130)
         machine.wait_until_fails(f"systemctl is-active {emulator}", timeout=300)
-        machine.fail("pgrep -f qemu-system-x86_64")
+        # The emulator waits up to 20s for a graceful shutdown. The bracketed
+        # pattern stops pgrep from matching the test command itself.
+        machine.wait_until_fails("pgrep -f '[q]emu-system-x86_64'", timeout=120)
         machine.fail("systemctl is-active android-appliance-idle.timer")
 
     with subtest("browser display starts android"):
-        machine.succeed("curl -sf http://127.0.0.1:6090/vnc.html | grep -q noVNC")
+        machine.succeed("curl -sf --max-time 60 http://127.0.0.1:6090/vnc.html | grep -q noVNC")
         machine.wait_for_unit(emulator, timeout=900)
         machine.wait_for_unit("android-appliance-scrcpy.service", timeout=120)
         machine.wait_until_succeeds("DISPLAY=:57 xwininfo -root -tree | grep -q Android", timeout=120)
@@ -165,7 +170,10 @@ testPkgs.testers.runNixOSTest {
 
     with subtest("host reboot saves state and leaves android off"):
         tony("androidctl start", timeout=900)
-        machine.reboot()
+        # Power-cycle instead of machine.reboot(): the driver starts QEMU with
+        # -no-reboot, so a guest reboot exits QEMU and the shell cannot reconnect.
+        machine.shutdown()
+        machine.start()
         machine.wait_for_unit("multi-user.target")
         machine.fail(f"systemctl is-active {emulator}")
         assert status().startswith("state=stopped"), status()

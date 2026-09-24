@@ -17,15 +17,19 @@ grep -qx "image.sysdir.1=$AVD_SYSTEM_IMAGE/" "$config"
 grep -qx "hw.ramSize=2048" "$config"
 grep -qx "saveOnExit=true" "$ANDROID_AVD_HOME/android.avd/quickbootChoice.ini"
 
-# The emulator writes the size with a unit. An equal value stays as it is.
-sed -i 's/^hw.ramSize=.*/hw.ramSize=2048M/' "$config"
+# The emulator rewrites config.ini as "key = value". An equal value stays.
+sed -i 's/^hw.ramSize=.*/hw.ramSize = 2048M/' "$config"
+sed -i 's/^hw.cpu.ncore=.*/hw.cpu.ncore = 2/' "$config"
 touch "$ANDROID_AVD_HOME/android.avd/userdata-qemu.img"
 "$here/../src/avd-init" | grep -q "keeping userdata"
-grep -qx "hw.ramSize=2048M" "$config"
+grep -qx "hw.ramSize = 2048M" "$config"
+[ "$(grep -c '^hw.ramSize' "$config")" = 1 ]
 [ -e "$ANDROID_AVD_HOME/android.avd/userdata-qemu.img" ]
 
-# A changed option is applied.
-AVD_CORES=4 "$here/../src/avd-init" >/dev/null
+# A changed option replaces the spaced form and adds no duplicate.
+AVD_RAM_MIB=3072 AVD_CORES=4 "$here/../src/avd-init" >/dev/null
+grep -qx "hw.ramSize=3072" "$config"
+[ "$(grep -c '^hw.ramSize' "$config")" = 1 ]
 grep -qx "hw.cpu.ncore=4" "$config"
-[ "$(grep -c '^hw.cpu.ncore=' "$config")" = 1 ]
+[ "$(grep -c '^hw.cpu.ncore' "$config")" = 1 ]
 echo "avd-init tests passed"

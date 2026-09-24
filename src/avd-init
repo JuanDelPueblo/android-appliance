@@ -14,12 +14,14 @@ config=$avd_dir/config.ini
 
 set_key() {
   local key=$1 value=$2 current
-  current=$(sed -n "s/^$key=//p" "$config")
+  # The emulator rewrites config.ini as "key = value" with spaces. Accept
+  # both forms so a managed key never becomes a duplicate line.
+  current=$(sed -n "s/^$key *= *//p" "$config")
   # The emulator can write sizes back with a unit, for example 2048M.
   # Do not touch an equal value: a config change forces a cold boot.
   [ "${current%%[MG]*}" = "$value" ] && return
   if [ -n "$current" ]; then
-    sed -i "s|^$key=.*|$key=$value|" "$config"
+    sed -i "s|^$key *= *.*|$key=$value|" "$config"
   else
     echo "$key=$value" >>"$config"
   fi
