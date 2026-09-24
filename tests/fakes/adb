@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Fake adb for the androidctl tests. Guest state lives in $FAKE.
+[ "$1" = -s ] && shift 2
+echo "adb $*" >>"$FAKE/calls"
+case "$*" in
+  "emu avd status")
+    if [ -e "$FAKE/paused" ]; then echo "virtual device is stopped"; else echo "virtual device is running"; fi
+    echo OK
+    ;;
+  "emu avd stop") touch "$FAKE/paused"; echo OK ;;
+  "emu avd start") rm -f "$FAKE/paused"; echo OK ;;
+  "emu kill") echo "OK: killing emulator, bye bye" ;;
+  "shell getprop sys.boot_completed")
+    # A paused guest never answers.
+    [ -e "$FAKE/paused" ] && exec sleep 60
+    cat "$FAKE/boot"
+    ;;
+  "exec-out screencap -p") printf 'PNGDATA' ;;
+  *) ;;
+esac

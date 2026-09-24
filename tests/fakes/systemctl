@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Fake systemctl for the androidctl tests. Unit state lives in $FAKE/unit.
+echo "systemctl $*" >>"$FAKE/calls"
+args=()
+for a in "$@"; do [ "$a" = --no-block ] || args+=("$a"); done
+case "${args[0]}" in
+  is-active)
+    state=$(cat "$FAKE/unit")
+    echo "$state"
+    [ "$state" = active ]
+    ;;
+  start | restart)
+    # The real unit waits for boot completion in ExecStartPost.
+    echo active >"$FAKE/unit"
+    echo 1 >"$FAKE/boot"
+    rm -f "$FAKE/paused"
+    ;;
+  stop)
+    echo inactive >"$FAKE/unit"
+    echo 0 >"$FAKE/boot"
+    rm -f "$FAKE/paused"
+    ;;
+  *) exit 1 ;;
+esac

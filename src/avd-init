@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# avd-init: create the persistent AVD on first start and keep the managed
+# hardware keys in line with the NixOS options.
+#
+# The AVD format is two small ini files. Writing them directly avoids a JDK
+# and avdmanager at runtime. The emulator creates userdata on first boot.
+set -euo pipefail
+
+: "${ANDROID_AVD_HOME:?}" "${AVD_NAME:?}" "${AVD_SYSTEM_IMAGE:?}" "${AVD_API:?}"
+: "${AVD_TAG:?}" "${AVD_RAM_MIB:?}" "${AVD_CORES:?}" "${AVD_DISK_SIZE:?}"
+
+avd_dir=$ANDROID_AVD_HOME/$AVD_NAME.avd
+config=$avd_dir/config.ini
+
+set_key() {
+  local key=$1 value=$2
+  if grep -q "^$key=" "$config"; then
+    sed -i "s|^$key=.*|$key=$value|" "$config"
+  else
+    echo "$key=$value" >>"$config"
+  fi
+}
+
+mkdir -p "$ANDROID_AVD_HOME" "$HOME/.android"
+
+if [ ! -f "$config" ]; then
+  echo "avd-init: creating AVD '$AVD_NAME' in $avd_dir"
+  mkdir -p "$avd_dir"
+  cat >"$ANDROID_AVD_HOME/$AVD_NAME.ini" <<EOF
+avd.ini.encoding=UTF-8
+path=$avd_dir
+path.rel=avd/$AVD_NAME.avd
+target=android-$AVD_API
+EOF
+  cat >"$config" <<EOF
+avd.ini.encoding=UTF-8
+AvdId=$AVD_NAME
+avd.ini.displayname=$AVD_NAME
+abi.type=x86_64
+hw.cpu.arch=x86_64
+image.sysdir.1=$AVD_SYSTEM_IMAGE/
+tag.id=$AVD_TAG
+tag.display=Google Play
+PlayStore.enabled=true
+disk.dataPartition.size=$AVD_DISK_SIZE
+fastboot.forceColdBoot=no
+fastboot.forceFastBoot=yes
+hw.lcd.width=1080
+hw.lcd.height=1920
+hw.lcd.density=420
+hw.keyboard=yes
+hw.mainKeys=no
+hw.gpu.enabled=yes
+hw.audioInput=no
+hw.audioOutput=no
+hw.camera.back=none
+hw.camera.front=none
+showDeviceFrame=no
+EOF
+else
+  echo "avd-init: AVD '$AVD_NAME' exists; keeping userdata"
+fi
+
+# A changed value makes the emulator cold boot once instead of restoring the
+# Quick Boot snapshot. Userdata is kept.
+set_key hw.ramSize "$AVD_RAM_MIB"
+set_key hw.cpu.ncore "$AVD_CORES"
