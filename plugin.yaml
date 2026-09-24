@@ -1,6 +1,5 @@
 name: android-appliance
 version: 0.1.0
-manifest_version: 2
 description: "Operate the on-demand Android Emulator appliance through androidctl: lifecycle, screenshots, UI dumps and input."
 author: JuanDelPueblo
 license: MIT
