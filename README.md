@@ -50,7 +50,7 @@ The design uses native parts only:
 NixOS:
   Android runtime (SDK, emulator, system image)
   systemd units
-  packages (androidctl)
+  androidctl (module implementation detail)
   permissions (polkit rule)
   persistent appliance directory
 
@@ -115,7 +115,7 @@ Requirements:
 | `memoryMiB` | `4096` | Guest RAM. |
 | `cores` | `4` | Guest CPU cores. |
 | `diskSize` | `32G` | Userdata size. It applies only when the AVD is created. |
-| `gpu` | `swiftshader_indirect` | Emulator `-gpu` mode. Use `host` only with a usable host GPU and EGL. |
+| `gpu` | `swiftshader` | Emulator `-gpu` mode. The default software renderer works on every headless host. Use `host` only with a usable host GPU and EGL. |
 | `display.enable` | `true` | Serve the browser display. |
 | `display.port` | `6090` | Loopback port of the noVNC page. |
 
@@ -311,7 +311,7 @@ journalctl -u android-appliance-scrcpy -u android-appliance-display -b
 | `device unauthorized` or `device offline` | The appliance uses its own adb server on port 5038 and its keys in `stateDir/home/.android`. Do not start a different adb server with the same port. Run `androidctl restart`. |
 | `Interactive authentication required` | The command ran as a user other than `user`. Run it as `user` or as root. |
 | Black browser display | Android is starting, or scrcpy restarts. Look at the scrcpy log. |
-| `-gpu host` fails | Use the default `swiftshader_indirect`, or give the host a working GPU and EGL. |
+| `-gpu host` fails | Use the default `swiftshader`, or give the host a working GPU and EGL. |
 
 To run adb directly for debugging, run it as `user` with the environment
 of the emulator unit (`HOME`, `ANDROID_ADB_SERVER_PORT`, `ANDROID_HOME`):

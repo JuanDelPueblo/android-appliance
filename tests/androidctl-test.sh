@@ -152,6 +152,13 @@ t_ui_retries_after_null_root() {
   [ "$(grep -c 'uiautomator dump' "$FAKE/calls")" = 2 ]
 }
 
+t_ui_fails_when_dump_never_succeeds() {
+  running
+  touch "$FAKE/ui_broken"
+  not ctl ui
+  grep -q 'did not produce a hierarchy' "$FAKE/out"
+}
+
 t_text_is_quoted() {
   running
   ctl text "it's a test"

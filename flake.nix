@@ -13,8 +13,6 @@
       nixosModules.default = ./nix/module.nix;
 
       packages.${system} = {
-        androidctl = pkgs.callPackage ./nix/package.nix { };
-        default = self.packages.${system}.androidctl;
         # Boots the real emulator in a NixOS VM. It needs KVM with nested
         # virtualization and downloads the system image, so it is not a check.
         integration-test = import ./nix/tests/integration.nix { inherit pkgs self; };

@@ -77,6 +77,9 @@ let
     Group = cfg.group;
     NoNewPrivileges = true;
     ProtectSystem = "strict";
+    # The appliance state is under stateDir, so hide the real home of the
+    # user. This matters when the user is a normal account such as tony.
+    ProtectHome = true;
     ReadWritePaths = [
       cfg.stateDir
       runDir
@@ -152,11 +155,13 @@ in
 
     gpu = mkOption {
       type = types.str;
-      default = "swiftshader_indirect";
+      default = "swiftshader";
       example = "host";
       description = ''
-        Emulator -gpu mode. The software renderer works on every headless
-        host. "host" needs a usable GPU and EGL on the host.
+        Emulator -gpu mode. The default software renderer (SwiftShader) works
+        on every headless host. Emulator 37 removed "swiftshader_indirect";
+        its modes are auto, host, software, lavapipe, swiftshader and swangle.
+        "host" needs a usable GPU and EGL on the host.
       '';
     };
 

@@ -18,7 +18,10 @@ case "$*" in
   "exec-out screencap -p") printf 'PNGDATA' ;;
   "shell uiautomator dump "*)
     # Fail once with a null root node, as a fresh boot can do.
-    if [ -e "$FAKE/ui_ready" ]; then
+    if [ -e "$FAKE/ui_broken" ]; then
+      : >"$FAKE/window_dump.xml"
+      echo "ERROR: null root node returned by UiTestAutomationBridge."
+    elif [ -e "$FAKE/ui_ready" ]; then
       printf '<hierarchy rotation="0"/>' >"$FAKE/window_dump.xml"
     else
       : >"$FAKE/window_dump.xml"

@@ -42,7 +42,7 @@ let
   ]);
 in
 {
-  androidctl = self.packages.x86_64-linux.androidctl;
+  androidctl = pkgs.callPackage ./package.nix { };
 
   shellcheck = pkgs.runCommand "shellcheck" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
     cd ${src}
