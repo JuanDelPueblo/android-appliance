@@ -80,6 +80,7 @@
 
     const state = status && status.ok ? status.state : "unknown";
     const ready = status && status.boot_completed === "1";
+    const readiness = ready ? "ready" : state === "suspended" ? "paused" : "not ready";
     const allowed = ENABLED[state] || [];
 
     return h(
@@ -95,7 +96,7 @@
           h("span", null, "State:"),
           h(Badge, null, state),
           h("span", { className: "ml-4" }, "Android:"),
-          h(Badge, { variant: ready ? "default" : "secondary" }, ready ? "ready" : "not ready"),
+          h(Badge, { variant: ready ? "default" : "secondary" }, readiness),
           status && status.ok
             ? h("span", { className: "ml-4 text-muted-foreground" }, "Idle " + formatIdle(status.idle_seconds))
             : null
