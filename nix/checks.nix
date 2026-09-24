@@ -46,7 +46,7 @@ in
 
   shellcheck = pkgs.runCommand "shellcheck" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
     cd ${src}
-    shellcheck src/androidctl src/avd-init tests/androidctl-test.sh tests/fakes/*
+    shellcheck src/androidctl src/avd-init tests/*.sh tests/fakes/*
     touch $out
   '';
 
@@ -66,6 +66,7 @@ in
         chmod -R u+w .
         patchShebangs src tests
         bash tests/androidctl-test.sh
+        bash tests/avd-init-test.sh
         touch $out
       '';
 

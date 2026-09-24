@@ -13,8 +13,12 @@ avd_dir=$ANDROID_AVD_HOME/$AVD_NAME.avd
 config=$avd_dir/config.ini
 
 set_key() {
-  local key=$1 value=$2
-  if grep -q "^$key=" "$config"; then
+  local key=$1 value=$2 current
+  current=$(sed -n "s/^$key=//p" "$config")
+  # The emulator can write sizes back with a unit, for example 2048M.
+  # Do not touch an equal value: a config change forces a cold boot.
+  [ "${current%%[MG]*}" = "$value" ] && return
+  if [ -n "$current" ]; then
     sed -i "s|^$key=.*|$key=$value|" "$config"
   else
     echo "$key=$value" >>"$config"
@@ -65,3 +69,7 @@ fi
 # Quick Boot snapshot. Userdata is kept.
 set_key hw.ramSize "$AVD_RAM_MIB"
 set_key hw.cpu.ncore "$AVD_CORES"
+
+# Without a window there is no Quick Boot dialog, and the emulator does not
+# save the snapshot on exit unless this choice is set.
+echo "saveOnExit=true" >"$avd_dir/quickbootChoice.ini"

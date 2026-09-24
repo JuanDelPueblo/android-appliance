@@ -93,7 +93,7 @@ testPkgs.testers.runNixOSTest {
         print(f"cold boot took {time.monotonic() - start:.0f}s")
         assert status().startswith("state=running boot_completed=1"), status()
         machine.succeed(f"test -f {state_dir}/avd/android.ini")
-        machine.succeed(f"grep -q '^hw.ramSize=2048$' {state_dir}/avd/android.avd/config.ini")
+        machine.succeed(f"grep -q '^hw.ramSize=2048' {state_dir}/avd/android.avd/config.ini")
 
     with subtest("adb commands and screenshot"):
         assert tony("androidctl shell getprop ro.build.version.sdk") == "36"
