@@ -43,7 +43,7 @@ usage: androidctl <command> [args]
 Lifecycle:
   status                        print state, boot readiness and idle time
   start [--no-wait]             start or resume Android and wait until usable
-  stop                          shut down and save the Quick Boot state
+  stop                          shut down (saves Quick Boot state if enabled)
   suspend                       pause the emulator and keep its RAM
   resume                        continue a paused emulator
   restart [--no-wait]           stop, then start again

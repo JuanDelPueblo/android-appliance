@@ -40,8 +40,15 @@ The design uses native parts only:
   RAM stays in memory and the vCPUs stop. **Resume** uses
   `adb emu avd start`.
 - **Stop** uses `adb emu kill`, the normal emulator shutdown path. It saves
-  the Quick Boot snapshot. `stop-hook` waits up to 90 seconds, then
-  returns so systemd can SIGTERM; the outer `TimeoutStopSec` is 3 minutes.
+  the Quick Boot snapshot, unless `quickBoot` is `false`. `stop-hook` waits
+  up to 90 seconds, then returns so systemd can SIGTERM; the outer
+  `TimeoutStopSec` is 3 minutes.
+- **Guest RAM** is always anonymous memory. The emulator gets
+  `-feature -QuickbootFileBacked`. By default the emulator maps the guest
+  RAM to the Quick Boot `ram.img` file, so each guest RAM write becomes a
+  dirty page of that file. On a slow disk or with low `vm.dirty_bytes`
+  limits, the kernel then stops the guest until Android's watchdog kills
+  `system_server`. A snapshot saves the whole RAM at stop instead.
 - **Idle policy** is a timestamp file and a systemd timer. The timer is
   bound to the emulator unit, so nothing runs while Android is stopped.
 - **Display** is Xvnc at 1080x1920 (the device native size), scrcpy, and
@@ -121,6 +128,7 @@ Requirements:
 | `memoryMiB` | `4096` | Guest RAM. |
 | `cores` | `4` | Guest CPU cores. |
 | `diskSize` | `32G` | Userdata size. It applies only when the AVD is created. |
+| `quickBoot` | `true` | Save a Quick Boot snapshot at stop and restore it at start. `false` passes `-no-snapshot`: every start is a cold boot, and a stop writes no snapshot. Use `false` when snapshots do not load on the host. Suspend and resume still work. |
 | `gpu` | `swiftshader` | Emulator `-gpu` mode. The default software renderer works on every headless host. `host` needs a usable GPU and EGL; it uses the appliance X server (`:57`), adds `render`/`video` groups, binds only `/tmp/.X11-unix`, and passes `-feature -Vulkan` to match the known-good Juno setup. |
 | `display.enable` | `true` | Serve the browser display at 1080x1920. |
 | `display.port` | `6090` | Loopback port of the noVNC page. |
@@ -191,7 +199,7 @@ WARNING: Step 2 deletes all apps, accounts and data on the device.
 ```text
 androidctl status                        state, boot readiness, idle time
 androidctl start [--no-wait]             start or resume, then wait until usable
-androidctl stop                          shut down and save Quick Boot state
+androidctl stop                          shut down (saves Quick Boot state if enabled)
 androidctl suspend                       pause and keep RAM
 androidctl resume                        continue after suspend
 androidctl restart [--no-wait]           stop, then start
@@ -227,7 +235,7 @@ as the configured user.
 | `starting` | The unit is active or activating, but Android has not finished its boot. |
 | `running` | Android reports `sys.boot_completed=1`. |
 | `suspended` | The emulator is paused. The guest RAM stays in host memory. |
-| `stopping` | The unit is saving Quick Boot state and exits. |
+| `stopping` | The unit shuts down Android (and saves Quick Boot state, if enabled) and exits. |
 
 Example:
 
@@ -245,7 +253,7 @@ running
 suspended
   │  idleHibernateMinutes without use (total, from the last use)
   ▼
-stopped with Quick Boot state saved
+stopped (with Quick Boot state saved, if quickBoot is true)
 ```
 
 "Use" is one of these:
@@ -353,7 +361,8 @@ journalctl -u android-appliance-scrcpy -u android-appliance-display -b
 |---|---|
 | `start` fails at once | Look for KVM errors in the log. Make sure that `/dev/kvm` exists. |
 | `start` waits a long time on the first run | The first boot is a cold boot that creates userdata. Wait up to 20 minutes on slow hosts. |
-| Every start is a cold boot | The snapshot did not save. Look for errors near `emu kill` in the log. A `memoryMiB`, `cores`, or display-size change also causes one cold boot. |
+| Every start is a cold boot | With `quickBoot = false`, this is normal. Otherwise, the snapshot did not save or did not load. Look for errors near `emu kill` and "Failed to load snapshot" in the log. A `memoryMiB`, `cores`, or display-size change also causes one cold boot. If snapshots never load on the host, set `quickBoot = false`. |
+| "System UI isn't responding", ANRs, `system_server` restarts | The guest does not get CPU or disk time. Make sure that the log shows "Feature 'QuickbootFileBacked' ... overridden to 'disabled'". Keep `stateDir` on a fast local disk. |
 | `state=starting` does not change | Android did not finish its boot. `start` waits with `--no-block`, so Ctrl-C only stops waiting. If the unit died, `start` reports it; otherwise run `androidctl restart`. Look at the emulator log. |
 | `device unauthorized` | The AVD trusts another adb key. `start` fails fast with this diagnostic. Copy the old key into `stateDir/home/.android/` (see adopting an AVD), then restart. The appliance uses its own adb server on port 5038; do not start another server with the same port. |
 | `device offline` for 120s | The guest is stuck. `start` reports it; look at the emulator log and restart. A brief offline during early boot is normal. |

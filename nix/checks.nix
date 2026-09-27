@@ -10,7 +10,7 @@ let
   # A minimal system that enables the module, to check that it evaluates.
   apiLevel = 36;
   mkSystem =
-    gpu:
+    extra:
     nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       modules = [
@@ -27,9 +27,10 @@ let
             enable = true;
             user = "tony";
             group = "users";
-            inherit apiLevel gpu;
+            inherit apiLevel;
             stateDir = "/var/lib/juno/android";
-          };
+          }
+          // extra;
           users.users.tony = {
             isNormalUser = true;
             group = "users";
@@ -37,13 +38,18 @@ let
         }
       ];
     };
-  system = mkSystem "swiftshader";
-  systemHost = mkSystem "host";
+  system = mkSystem { gpu = "swiftshader"; };
+  systemHost = mkSystem { gpu = "host"; };
+  systemNoSnapshot = mkSystem {
+    gpu = "host";
+    quickBoot = false;
+  };
   units = system.config.systemd.services;
   unitsHost = systemHost.config.systemd.services;
   bootUnits = system.config.systemd.targets.multi-user.wants or [ ];
   emu = units.android-appliance-emulator;
   emuHost = unitsHost.android-appliance-emulator;
+  emuNoSnapshot = systemNoSnapshot.config.systemd.services.android-appliance-emulator;
   xvnc = units.android-appliance-xvnc;
   scrcpy = units.android-appliance-scrcpy;
   pythonEnv = pkgs.python3.withPackages (ps: [
@@ -126,6 +132,9 @@ in
     assert (emu.serviceConfig.BindPaths or [ ]) == [ ];
     assert builtins.match ".*-gpu swiftshader.*" emu.serviceConfig.ExecStart != null;
     assert builtins.match ".*Vulkan.*" emu.serviceConfig.ExecStart == null;
+    # Guest RAM is never file-backed. Quick Boot stays on by default.
+    assert builtins.match ".*-feature -QuickbootFileBacked( .*)?" emu.serviceConfig.ExecStart != null;
+    assert builtins.match ".*-no-snapshot.*" emu.serviceConfig.ExecStart == null;
     assert emu.serviceConfig.SupplementaryGroups == [ "kvm" ];
     # Host rendering gets the X display, ordering, socket bind, groups and
     # the known-good Vulkan-off flag.
@@ -135,7 +144,12 @@ in
     assert emuHost.serviceConfig.BindPaths == [ "/tmp/.X11-unix" ];
     assert emuHost.serviceConfig.PrivateTmp == true;
     assert builtins.match ".*-gpu host.*" emuHost.serviceConfig.ExecStart != null;
-    assert builtins.match ".*-feature -Vulkan.*" emuHost.serviceConfig.ExecStart != null;
+    assert
+      builtins.match ".*-feature -QuickbootFileBacked,-Vulkan( .*)?" emuHost.serviceConfig.ExecStart
+      != null;
+    assert builtins.match ".*-no-snapshot.*" emuHost.serviceConfig.ExecStart == null;
+    # quickBoot = false turns off snapshot load and save.
+    assert builtins.match ".* -no-snapshot( .*)?" emuNoSnapshot.serviceConfig.ExecStart != null;
     assert builtins.elem "render" emuHost.serviceConfig.SupplementaryGroups;
     assert builtins.elem "video" emuHost.serviceConfig.SupplementaryGroups;
     pkgs.writeText "module-eval" (

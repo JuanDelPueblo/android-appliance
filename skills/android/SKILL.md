@@ -24,8 +24,9 @@ States: `stopped`, `starting`, `running`, `suspended`, `stopping`.
   `start` before them.
 - `androidctl status` (tool `android_status`) never wakes Android. Use it
   to check the state.
-- Android suspends after some idle time, then stops with its Quick Boot
-  state saved. The next command restores it. This is normal.
+- Android suspends after some idle time, then stops. If Quick Boot is on,
+  the stop saves its state and the next command restores it. Otherwise the
+  next command does a cold boot. This is normal.
 - A start from `stopped` can take from some seconds (Quick Boot) to some
   minutes (cold boot). Wait for it; do not retry in a loop.
 

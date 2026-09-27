@@ -133,7 +133,7 @@
         h(
           "p",
           { className: "text-xs text-muted-foreground" },
-          "Opening the display starts or resumes Android. Idle Android suspends, then stops with its Quick Boot state saved."
+          "Opening the display starts or resumes Android. Idle Android suspends, then stops (with its Quick Boot state saved, if enabled)."
         )
       )
     );

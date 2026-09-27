@@ -86,7 +86,7 @@ START = _schema(
 )
 STOP = _schema(
     "android_stop",
-    "Shut Android down and save its Quick Boot state. Frees the host RAM. Idle Android stops by "
+    "Shut Android down (saves its Quick Boot state, if enabled). Frees the host RAM. Idle Android stops by "
     "itself, so call this only when asked.",
     {},
 )

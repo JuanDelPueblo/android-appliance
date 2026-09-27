@@ -164,6 +164,18 @@ in
       description = "Userdata partition size. It applies only when the AVD is created.";
     };
 
+    quickBoot = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Save a Quick Boot snapshot at stop and restore it at start. When
+        false, the emulator gets -no-snapshot, so every start is a cold boot
+        and a stop writes no snapshot. Use false when snapshots do not load
+        on the host, for example with some "host" GPU setups. Suspend and
+        resume still work, because they only pause the guest.
+      '';
+    };
+
     gpu = mkOption {
       type = types.str;
       default = "swiftshader";
@@ -270,8 +282,8 @@ in
               BindPaths = lib.optionals hostGpu [ "/tmp/.X11-unix" ];
               WorkingDirectory = cfg.stateDir;
               ExecStartPre = "${androidctl}/bin/android-avd-init";
-              ExecStart =
-                lib.escapeShellArgs [
+              ExecStart = lib.escapeShellArgs (
+                [
                   "${sdkRoot}/emulator/emulator"
                   "-avd"
                   cfg.avdName
@@ -283,15 +295,28 @@ in
                   "-no-metrics"
                   "-gpu"
                   cfg.gpu
+                  "-feature"
+                  (lib.concatStringsSep "," (
+                    # By default the emulator maps the guest RAM to the Quick
+                    # Boot ram.img file, so each guest RAM write becomes a
+                    # dirty page of that file. Low vm.dirty_bytes limits or a
+                    # slow disk then stop the guest CPUs until Android's
+                    # watchdog kills system_server. Keep the RAM anonymous;
+                    # a snapshot then saves the RAM at stop instead.
+                    [ "-QuickbootFileBacked" ]
+                    # The old known-good Juno setup used -feature -Vulkan with
+                    # host rendering; plain -gpu host tries Vulkan and fails
+                    # without a display. Keep Vulkan off for host mode.
+                    ++ lib.optionals hostGpu [ "-Vulkan" ]
+                  ))
                 ]
-                # The old known-good Juno setup used -feature -Vulkan with
-                # host rendering; plain -gpu host tries Vulkan and fails
-                # without a display. Keep Vulkan off for host mode.
-                + lib.optionalString hostGpu " -feature -Vulkan";
+                ++ lib.optionals (!cfg.quickBoot) [ "-no-snapshot" ]
+              );
               # Wait for Android boot completion, so "activating" means "starting".
               ExecStartPost = "${ctl} boot-hook";
-              # `adb emu kill` saves the Quick Boot snapshot. stop-hook waits
-              # up to 90s; systemd sends SIGTERM/SIGKILL after TimeoutStopSec.
+              # `adb emu kill` saves the Quick Boot snapshot, unless quickBoot
+              # is false. stop-hook waits up to 90s; systemd sends
+              # SIGTERM/SIGKILL after TimeoutStopSec.
               ExecStop = "${ctl} stop-hook";
               TimeoutStartSec = "20min";
               TimeoutStopSec = "3min";
