@@ -24,7 +24,11 @@ case "$*" in
       echo device
     fi
     ;;
-  "exec-out screencap -p") printf 'PNGDATA' ;;
+  "exec-out screencap -p")
+    printf 'PNGDATA'
+    [ ! -e "$FAKE/screenshot_broken" ]
+    ;;
+  "shell rm -f /data/local/tmp/window_dump."*".xml") rm -f "$FAKE/window_dump.xml" ;;
   "shell uiautomator dump "*)
     # Fail once with a null root node, as a fresh boot can do.
     if [ -e "$FAKE/ui_broken" ]; then
@@ -38,7 +42,7 @@ case "$*" in
       echo "ERROR: null root node returned by UiTestAutomationBridge."
     fi
     ;;
-  "exec-out cat /data/local/tmp/window_dump.xml")
+  "exec-out cat /data/local/tmp/window_dump."*".xml")
     cat "$FAKE/window_dump.xml" 2>/dev/null || true
     ;;
   *) ;;

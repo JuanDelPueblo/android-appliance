@@ -11,9 +11,19 @@ case "${args[0]}" in
     ;;
   start | restart)
     # The real unit waits for boot completion in ExecStartPost.
-    echo active >"$FAKE/unit"
-    echo 1 >"$FAKE/boot"
+    if [ ! -e "$FAKE/pending_start" ]; then
+      echo active >"$FAKE/unit"
+      echo 1 >"$FAKE/boot"
+    fi
     rm -f "$FAKE/paused"
+    ;;
+  show)
+    if [ -e "$FAKE/pending_start" ]; then
+      echo '123 /org/freedesktop/systemd1/job/123'
+      echo active >"$FAKE/unit"
+      echo 1 >"$FAKE/boot"
+      rm -f "$FAKE/pending_start"
+    fi
     ;;
   stop)
     echo inactive >"$FAKE/unit"

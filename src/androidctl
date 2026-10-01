@@ -2,7 +2,7 @@
 # androidctl: lifecycle control and automation for the Android appliance.
 #
 # systemd owns the emulator process. This script only asks systemd to start
-# or stop the unit, and uses the emulator console (adb emu) for pause/resume.
+# or stop the unit. Every start is a cold boot; userdata stays persistent.
 # All configuration comes from ANDROID_APPLIANCE_* variables that the NixOS
 # module sets in the installed wrapper.
 set -euo pipefail
@@ -11,7 +11,6 @@ state_dir=${ANDROID_APPLIANCE_STATE_DIR:-/var/lib/android-appliance}
 unit=${ANDROID_APPLIANCE_UNIT:-android-appliance-emulator.service}
 adb_bin=${ANDROID_APPLIANCE_ADB:-adb}
 serial=${ANDROID_APPLIANCE_SERIAL:-emulator-5554}
-suspend_after=${ANDROID_APPLIANCE_IDLE_SUSPEND:-600}
 stop_after=${ANDROID_APPLIANCE_IDLE_STOP:-3600}
 boot_timeout=${ANDROID_APPLIANCE_BOOT_TIMEOUT:-900}
 stop_hook_timeout=${ANDROID_APPLIANCE_STOP_HOOK_TIMEOUT:-90}
@@ -27,7 +26,6 @@ if [ "$(id -u)" = 0 ] && [ -n "$appliance_user" ] && [ "$appliance_user" != root
 fi
 
 activity_file=$state_dir/last-activity
-suspended_file=$state_dir/suspended-at
 
 # adb keys and the emulator console token live in the appliance home, so
 # every adb client and the emulator agree on them.
@@ -42,15 +40,13 @@ usage: androidctl <command> [args]
 
 Lifecycle:
   status                        print state, boot readiness and idle time
-  start [--no-wait]             start or resume Android and wait until usable
-  stop                          shut down (saves Quick Boot state if enabled)
-  suspend                       pause the emulator and keep its RAM
-  resume                        continue a paused emulator
+  start [--no-wait]             start Android and wait until usable
+  stop                          shut down Android and free its RAM
   restart [--no-wait]           stop, then start again
   wait                          block until the current boot completes
   display                       print the local URL of the browser display
 
-Automation (these start or resume Android when necessary):
+Automation (these start Android when necessary):
   screenshot [file]             save the screen as PNG and print the path
   ui                            print the UI hierarchy as XML
   tap <x> <y>                   tap a screen coordinate
@@ -69,34 +65,19 @@ die() {
   exit 1
 }
 
-adb() { "$adb_bin" -s "$serial" "$@"; }
+adb() { timeout "${ANDROID_APPLIANCE_COMMAND_TIMEOUT:-300}" "$adb_bin" -s "$serial" "$@"; }
 
-# Probes must never hang: a paused guest does not answer adb shell.
+# Bound probes so an unresponsive guest cannot hang status or shutdown.
 probe() { timeout 10 "$adb_bin" -s "$serial" "$@" 2>/dev/null; }
 
-# Grep the probe output without a pipe. `grep -q` closes the pipe on the first
-# match, and pipefail then reports the producer's SIGPIPE as a failure.
-probe_has() {
-  local pattern=$1 out
-  shift
-  out=$(probe "$@") || true
-  grep -q "$pattern" <<<"$out"
-}
-
 unit_state() { systemctl is-active "$unit" 2>/dev/null || true; }
-
-# The console runs in the emulator host process, so it answers while the
-# guest is paused. It prints "virtual device is running|stopped".
-vm_paused() { probe_has 'is stopped' emu avd status; }
 
 boot_completed() { [ "$(probe shell getprop sys.boot_completed | tr -d '\r')" = 1 ]; }
 
 current_state() {
   case "$(unit_state)" in
     active)
-      if vm_paused; then
-        echo suspended
-      elif boot_completed; then
+      if boot_completed; then
         echo running
       else
         echo starting
@@ -111,6 +92,12 @@ current_state() {
 now() { date +%s; }
 
 touch_activity() { touch "$activity_file" 2>/dev/null || echo "androidctl: cannot update $activity_file" >&2; }
+
+finish_command() {
+  local exit_status=$1
+  if [ -n "${screenshot_tmp:-}" ]; then rm -f "$screenshot_tmp"; fi
+  if [ "$exit_status" = 0 ]; then touch_activity; fi
+}
 
 # Seconds since the last X input on the display (browser mouse/keyboard).
 x_idle() {
@@ -130,7 +117,7 @@ idle_seconds() {
   if x=$(x_idle) && [ "$x" -lt "$idle" ]; then
     idle=$x
   fi
-  echo "$idle"
+  echo "$((idle < 0 ? 0 : idle))"
 }
 
 adb_state() {
@@ -139,18 +126,26 @@ adb_state() {
 }
 
 wait_boot() {
-  local deadline=$(($(now) + boot_timeout)) state offline_since=0
-  while ! boot_completed; do
-    case "$(unit_state)" in
-      # deactivating occurs when a previous stop (for example idle hibernate)
-      # still saves its snapshot while a new start is queued.
-      active | activating | deactivating) ;;
-      *) die "the emulator unit stopped during boot; see: journalctl -u $unit" ;;
+  local deadline=$(($(now) + boot_timeout)) state unit_status offline_since=0
+  while true; do
+    state=
+    unit_status=$(unit_state)
+    case "$unit_status" in
+      active | activating)
+        boot_completed && return 0
+        state=$(adb_state)
+        ;;
+      # A queued start may still be waiting for shutdown to finish. Never
+      # accept the old guest's boot property as proof of the new boot.
+      deactivating) ;;
+      *)
+        # systemctl --no-block may have queued the emulator behind an X
+        # server dependency, leaving it inactive until that dependency starts.
+        if [ -z "$(systemctl show --property=Job --value "$unit" 2>/dev/null || true)" ]; then
+          die "the emulator unit stopped during boot; see: journalctl -u $unit"
+        fi
+        ;;
     esac
-    if vm_paused; then
-      die "android is suspended"
-    fi
-    state=$(adb_state)
     case "$state" in
       unauthorized)
         die "device unauthorized: the AVD trusts another adb key; copy the old key into $state_dir/home/.android/ then restart"
@@ -190,16 +185,6 @@ wait_active() {
   done
 }
 
-resume_vm() {
-  probe_has OK emu avd start || die "the emulator did not accept resume"
-  rm -f "$suspended_file"
-}
-
-suspend_vm() {
-  probe_has OK emu avd stop || die "the emulator did not accept suspend"
-  touch "$suspended_file"
-}
-
 cmd_status() {
   local state boot=0
   state=$(current_state)
@@ -210,63 +195,31 @@ cmd_status() {
 cmd_start() {
   local no_wait=${1:-}
   touch_activity
-  case "$(current_state)" in
-    running) ;;
-    suspended)
-      resume_vm
-      # Wait until the guest answers; otherwise the following adb command
-      # (which has no timeout) could hang while Android wakes.
-      wait_boot
-      ;;
-    *)
-      if [ "$no_wait" = --no-wait ]; then
-        systemctl start --no-block "$unit"
-        return
-      fi
-      # Queue the start without tying this terminal to ExecStartPost, then
-      # wait independently. Ctrl-C stops waiting, not the emulator start;
-      # systemd stays activating until boot-hook reports boot completion.
-      systemctl start --no-block "$unit" || die "the emulator unit failed to start; see: journalctl -u $unit"
-      wait_boot
-      wait_active
-      ;;
-  esac
+  # Do not probe Android in the asynchronous path; it must return promptly
+  # even when adb or the guest is unresponsive.
+  if [ "$no_wait" = --no-wait ]; then
+    systemctl start --no-block "$unit"
+    return
+  fi
+  systemctl start --no-block "$unit" || die "the emulator unit failed to start; see: journalctl -u $unit"
+  wait_boot
+  wait_active
 }
 
 cmd_restart() {
-  touch_activity
   if [ "${1:-}" = --no-wait ]; then
+    touch_activity
     systemctl restart --no-block "$unit"
   else
-    systemctl restart --no-block "$unit" || die "the emulator unit failed to start; see: journalctl -u $unit"
-    wait_boot
-    wait_active
+    # A nonblocking restart can still expose the old guest's boot_completed
+    # property. Finish shutdown before waiting for the next boot.
+    cmd_stop
+    cmd_start
   fi
 }
 
 cmd_stop() {
   systemctl stop "$unit"
-}
-
-cmd_suspend() {
-  case "$(current_state)" in
-    running) suspend_vm ;;
-    suspended) ;;
-    starting) die "android is still starting" ;;
-    *) die "android is not running" ;;
-  esac
-}
-
-cmd_resume() {
-  touch_activity
-  case "$(current_state)" in
-    suspended)
-      resume_vm
-      wait_boot
-      ;;
-    running) ;;
-    *) die "android is not suspended" ;;
-  esac
 }
 
 cmd_wait() {
@@ -282,7 +235,7 @@ cmd_wait() {
 # Internal: ExecStartPost of the emulator unit.
 cmd_boot_hook() {
   wait_boot
-  rm -f "$suspended_file"
+  touch_activity
   # The appliance has no physical power button; keep the screen on and
   # unlocked so taps and the browser display work immediately.
   probe shell svc power stayon true || true
@@ -290,11 +243,10 @@ cmd_boot_hook() {
 }
 
 # Internal: ExecStop of the emulator unit. `emu kill` is the normal emulator
-# shutdown path and saves the Quick Boot snapshot. Wait boundedly so a stuck
+# shutdown path. Snapshots are disabled. Wait boundedly so a stuck
 # renderer does not hold shutdown for the full TimeoutStopSec; systemd sends
 # SIGTERM/SIGKILL after this returns.
 cmd_stop_hook() {
-  probe emu avd start >/dev/null || true
   probe emu kill >/dev/null || return 0
   local pid=${MAINPID:-} deadline=$(($(now) + stop_hook_timeout))
   [ -n "$pid" ] || return 0
@@ -308,12 +260,8 @@ cmd_stop_hook() {
 
 # Internal: run by the idle timer while the emulator unit is active.
 cmd_idle_check() {
-  local state idle x suspended_at
-  state=$(current_state)
-  case "$state" in
-    running | suspended) ;;
-    *) return 0 ;;
-  esac
+  local idle
+  [ "$(current_state)" = running ] || return 0
   if [ ! -e "$activity_file" ]; then
     touch_activity
     return 0
@@ -322,19 +270,6 @@ cmd_idle_check() {
   if [ "$idle" -ge "$stop_after" ]; then
     echo "idle for ${idle}s: stopping android"
     systemctl stop --no-block "$unit"
-  elif [ "$idle" -ge "$suspend_after" ]; then
-    if [ "$state" = running ]; then
-      echo "idle for ${idle}s: suspending android"
-      suspend_vm
-    fi
-  elif [ "$state" = suspended ] && [ -e "$suspended_file" ] && x=$(x_idle); then
-    # Display input after an automatic or manual suspend resumes Android.
-    suspended_at=$(stat -c %Y "$suspended_file")
-    if [ $(($(now) - x)) -gt "$suspended_at" ]; then
-      echo "display input: resuming android"
-      touch_activity
-      resume_vm
-    fi
   fi
 }
 
@@ -360,11 +295,21 @@ cmd=$1
 shift
 
 case "$cmd" in
+  idle-check)
+    exec 9>"$state_dir/activity.lock"
+    flock -n 9 || exit 0
+    ;;
+  start | restart | screenshot | ui | tap | swipe | text | key | shell | install | push | pull)
+    exec 9>"$state_dir/activity.lock"
+    flock -s 9
+    trap 'finish_command "$?"' EXIT
+    ;;
+esac
+
+case "$cmd" in
   status) cmd_status ;;
   start) cmd_start "${1:-}" ;;
   stop) cmd_stop ;;
-  suspend) cmd_suspend ;;
-  resume) cmd_resume ;;
   restart) cmd_restart "${1:-}" ;;
   wait) cmd_wait ;;
   display)
@@ -373,25 +318,33 @@ case "$cmd" in
     ;;
   screenshot)
     ensure_running
-    out=${1:-$state_dir/screenshots/$(date +%Y%m%d-%H%M%S).png}
+    out=${1:-$state_dir/screenshots/$(date +%Y%m%d-%H%M%S-%N).png}
     mkdir -p "$(dirname "$out")"
-    adb exec-out screencap -p >"$out"
-    [ -s "$out" ] || die "the screenshot is empty"
+    screenshot_tmp=$(mktemp "$(dirname "$out")/.screenshot.XXXXXX")
+    adb exec-out screencap -p >"$screenshot_tmp"
+    [ -s "$screenshot_tmp" ] || die "the screenshot is empty"
+    mv "$screenshot_tmp" "$out"
+    screenshot_tmp=
     echo "$out"
     ;;
   ui)
     ensure_running
-    dump=/data/local/tmp/window_dump.xml
+    dump=/data/local/tmp/window_dump.$$.xml
     # A fresh boot can answer "null root node" once before a window exists.
     out=
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-      adb shell uiautomator dump "$dump" >/dev/null 2>&1 || true
-      out=$(adb exec-out cat "$dump" 2>/dev/null || true)
+      adb shell rm -f "$dump"
+      if adb shell uiautomator dump "$dump" >/dev/null 2>&1; then
+        out=$(adb exec-out cat "$dump" 2>/dev/null || true)
+      else
+        out=
+      fi
       case "$out" in
         *"<hierarchy"*) break ;;
       esac
       sleep 1
     done
+    adb shell rm -f "$dump" >/dev/null 2>&1 || true
     case "$out" in
       *"<hierarchy"*) printf '%s\n' "$out" ;;
       *) die "the UI dump did not produce a hierarchy" ;;

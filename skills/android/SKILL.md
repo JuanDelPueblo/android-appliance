@@ -18,17 +18,16 @@ paths.
 
 ## Lifecycle
 
-States: `stopped`, `starting`, `running`, `suspended`, `stopping`.
+States: `stopped`, `starting`, `running`, `stopping`.
 
-- Automation commands start or resume Android when necessary. Do not call
+- Automation commands start Android when necessary. Do not call
   `start` before them.
 - `androidctl status` (tool `android_status`) never wakes Android. Use it
   to check the state.
-- Android suspends after some idle time, then stops. If Quick Boot is on,
-  the stop saves its state and the next command restores it. Otherwise the
-  next command does a cold boot. This is normal.
-- A start from `stopped` can take from some seconds (Quick Boot) to some
-  minutes (cold boot). Wait for it; do not retry in a loop.
+- Idle Android shuts down, preserving apps, accounts and userdata. The next
+  command cold boots it. There is no suspend/resume or Quick Boot.
+- A start from `stopped` can take some minutes. Wait for it; do not retry
+  in a loop.
 
 ## Commands
 
@@ -40,7 +39,7 @@ Use the terminal for the other operations:
 
 ```text
 androidctl status
-androidctl start | stop | suspend | resume | restart | wait
+androidctl start | stop | restart | wait
 androidctl screenshot [file]          # prints the PNG path
 androidctl ui                         # UI hierarchy XML
 androidctl tap <x> <y>

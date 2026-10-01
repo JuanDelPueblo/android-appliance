@@ -19,7 +19,6 @@ setup() {
   export ANDROID_APPLIANCE_ADB=$here/fakes/adb
   export ANDROID_APPLIANCE_XPRINTIDLE=$here/fakes/xprintidle
   export ANDROID_APPLIANCE_X_DISPLAY=:99
-  export ANDROID_APPLIANCE_IDLE_SUSPEND=600
   export ANDROID_APPLIANCE_IDLE_STOP=3600
   export ANDROID_APPLIANCE_BOOT_TIMEOUT=5
   unset ANDROID_APPLIANCE_USER
@@ -28,11 +27,6 @@ setup() {
 running() {
   echo active >"$FAKE/unit"
   echo 1 >"$FAKE/boot"
-}
-
-suspended() {
-  running
-  touch "$FAKE/paused" "$FAKE/state/suspended-at"
 }
 
 # Set the last androidctl activity to N seconds ago.
@@ -87,16 +81,6 @@ t_status_starting() {
   [[ "$(ctl status)" == "state=starting boot_completed=0 "* ]]
 }
 
-t_status_suspended_does_not_wake() {
-  suspended
-  idle_for 100
-  state_is suspended
-  not called "adb emu avd start"
-  not called "adb shell getprop sys.boot_completed"
-  # status does not refresh activity.
-  [ "$(($(date +%s) - $(stat -c %Y "$FAKE/state/last-activity")))" -ge 99 ]
-}
-
 t_start_from_stopped() {
   ctl start
   # Uses --no-block so Ctrl-C stops waiting, not the emulator start.
@@ -110,10 +94,11 @@ t_start_no_wait() {
   called "systemctl start --no-block android-appliance-emulator.service"
 }
 
-t_restart_uses_no_block() {
+t_restart_waits_for_shutdown() {
   running
   ctl restart
-  called "systemctl restart --no-block android-appliance-emulator.service"
+  called "systemctl stop android-appliance-emulator.service"
+  called "systemctl start --no-block android-appliance-emulator.service"
   state_is running
 }
 
@@ -149,18 +134,10 @@ t_stop_hook_bounded_when_pid_lives() {
   wait "$pid" 2>/dev/null || true
 }
 
-t_start_resumes_suspended() {
-  suspended
-  ctl start
-  called "adb emu avd start"
-  not grep -q '^systemctl start' "$FAKE/calls"
-  [ ! -e "$FAKE/state/suspended-at" ]
-}
-
-t_start_running_is_noop() {
+t_start_running_is_idempotent() {
   running
   ctl start
-  not grep -q '^systemctl start' "$FAKE/calls"
+  state_is running
   not called "adb emu avd start"
 }
 
@@ -168,16 +145,6 @@ t_tap_starts_stopped() {
   ctl tap 10 20
   called "systemctl start --no-block android-appliance-emulator.service"
   called "adb shell input tap 10 20"
-}
-
-t_tap_resumes_suspended() {
-  suspended
-  idle_for 900
-  ctl tap 10 20
-  called "adb emu avd start"
-  called "adb shell input tap 10 20"
-  # The interaction refreshed the activity time.
-  [ "$(($(date +%s) - $(stat -c %Y "$FAKE/state/last-activity")))" -lt 5 ]
 }
 
 t_screenshot() {
@@ -211,25 +178,6 @@ t_install_puts_apk_last() {
   called "adb install -r -g app.apk"
 }
 
-t_suspend_running() {
-  running
-  ctl suspend
-  called "adb emu avd stop"
-  [ -e "$FAKE/state/suspended-at" ]
-  state_is suspended
-}
-
-t_suspend_stopped_fails() {
-  not ctl suspend
-}
-
-t_resume() {
-  suspended
-  ctl resume
-  called "adb emu avd start"
-  state_is running
-}
-
 t_stop() {
   running
   ctl stop
@@ -246,13 +194,6 @@ t_wait_running() {
   ctl wait
 }
 
-t_stop_hook_resumes_then_kills() {
-  suspended
-  MAINPID='' ctl stop-hook
-  [ "$(grep '^adb emu' "$FAKE/calls")" = "adb emu avd start
-adb emu kill" ]
-}
-
 t_usage_error() {
   local rc=0
   ctl tap 1 >/dev/null 2>&1 || rc=$?
@@ -267,22 +208,15 @@ t_idle_recent_does_nothing() {
   not grep -q '^systemctl stop' "$FAKE/calls"
 }
 
-t_idle_suspends() {
+t_idle_before_stop_keeps_running() {
   running
   idle_for 700
   ctl idle-check
-  called "adb emu avd stop"
+  not called "adb emu avd stop"
   not grep -q '^systemctl stop' "$FAKE/calls"
 }
 
-t_idle_hibernates_suspended() {
-  suspended
-  idle_for 3700
-  ctl idle-check
-  called "systemctl stop --no-block android-appliance-emulator.service"
-}
-
-t_idle_hibernates_running() {
+t_idle_stops_running() {
   running
   idle_for 3700
   ctl idle-check
@@ -291,34 +225,83 @@ t_idle_hibernates_running() {
 
 t_idle_display_input_keeps_running() {
   running
-  idle_for 700
+  idle_for 3700
   echo 3000 >"$FAKE/xidle"
   ctl idle-check
-  not called "adb emu avd stop"
-}
-
-t_idle_display_input_resumes() {
-  suspended
-  idle_for 700
-  touch -d "@$(($(date +%s) - 60))" "$FAKE/state/suspended-at"
-  echo 5000 >"$FAKE/xidle"
-  ctl idle-check
-  called "adb emu avd start"
-}
-
-t_idle_manual_suspend_sticks() {
-  suspended
-  idle_for 30
-  # The last display input came before the suspend.
-  echo 120000 >"$FAKE/xidle"
-  ctl idle-check
-  not called "adb emu avd start"
+  not grep -q '^systemctl stop' "$FAKE/calls"
 }
 
 t_idle_stopped_does_nothing() {
   idle_for 99999
   ctl idle-check
   [ "$(grep -c '^systemctl' "$FAKE/calls")" = 1 ]
+}
+
+t_removed_commands_fail_without_adb() {
+  local rc=0
+  ctl suspend >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ]
+  rc=0
+  ctl resume >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ]
+  [ ! -s "$FAKE/calls" ]
+}
+
+t_stop_hook_only_kills() {
+  running
+  MAINPID='' ctl stop-hook
+  [ "$(grep '^adb emu' "$FAKE/calls")" = "adb emu kill" ]
+}
+
+t_start_no_wait_does_not_probe_adb() {
+  running
+  ctl start --no-wait
+  not grep -q '^adb' "$FAKE/calls"
+}
+
+t_idle_does_not_interrupt_inflight_command() {
+  running
+  idle_for 3700
+  exec 8>"$FAKE/state/activity.lock"
+  flock -s 8
+  ctl idle-check
+  not grep -q '^systemctl stop' "$FAKE/calls"
+  flock -u 8
+  exec 8>&-
+  ctl idle-check
+  called "systemctl stop --no-block android-appliance-emulator.service"
+}
+
+t_boot_hook_refreshes_activity_after_long_boot() {
+  running
+  idle_for 3700
+  ctl boot-hook
+  [ "$(($(date +%s) - $(stat -c %Y "$FAKE/state/last-activity")))" -lt 5 ]
+}
+
+t_failed_screenshot_preserves_previous_file() {
+  running
+  printf 'previous' >"$FAKE/shot.png"
+  touch "$FAKE/screenshot_broken"
+  not ctl screenshot "$FAKE/shot.png"
+  [ "$(cat "$FAKE/shot.png")" = previous ]
+  [ -z "$(find "$FAKE" -name '.screenshot.*' -print -quit)" ]
+}
+
+t_ui_does_not_return_previous_dump_after_failed_refresh() {
+  running
+  printf '<hierarchy stale="true"/>' >"$FAKE/window_dump.xml"
+  touch "$FAKE/ui_broken"
+  not ctl ui
+  not grep -q 'stale="true"' "$FAKE/out"
+}
+
+t_start_waits_for_queued_dependency() {
+  touch "$FAKE/pending_start"
+  echo 1 >"$FAKE/boot" # A stale guest property must not bypass the unit/job check.
+  ctl start
+  called "systemctl show --property=Job --value android-appliance-emulator.service"
+  state_is running
 }
 
 for t in $(declare -F | awk '{print $3}' | grep '^t_'); do

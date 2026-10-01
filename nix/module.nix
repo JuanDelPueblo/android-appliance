@@ -50,8 +50,7 @@ let
       ANDROID_APPLIANCE_ADB = adb;
       ANDROID_APPLIANCE_SERIAL = serial;
       ANDROID_ADB_SERVER_PORT = adbServerPort;
-      ANDROID_APPLIANCE_IDLE_SUSPEND = toString (cfg.idleSuspendMinutes * 60);
-      ANDROID_APPLIANCE_IDLE_STOP = toString (cfg.idleHibernateMinutes * 60);
+      ANDROID_APPLIANCE_IDLE_STOP = toString (cfg.idleStopMinutes * 60);
       ANDROID_APPLIANCE_XPRINTIDLE = lib.getExe pkgs.xprintidle;
     }
     // lib.optionalAttrs cfg.display.enable {
@@ -90,6 +89,18 @@ let
   };
 in
 {
+  imports = [
+    (lib.mkRemovedOptionModule [
+      "services"
+      "android-appliance"
+      "idleSuspendMinutes"
+    ] "Suspend/resume has been removed. Use idleStopMinutes for idle shutdown.")
+    (lib.mkRenamedOptionModule
+      [ "services" "android-appliance" "idleHibernateMinutes" ]
+      [ "services" "android-appliance" "idleStopMinutes" ]
+    )
+  ];
+
   options.services.android-appliance = {
     enable = lib.mkEnableOption "the on-demand Android Emulator appliance";
 
@@ -109,8 +120,8 @@ in
       type = types.path;
       default = "/var/lib/${prefix}";
       description = ''
-        Persistent appliance directory. It holds the AVD, userdata, the Quick
-        Boot snapshot and the adb keys. Back it up to keep Android app state.
+        Persistent appliance directory. It holds the AVD, userdata and adb
+        keys. Back it up to keep Android app state.
       '';
     };
 
@@ -131,19 +142,10 @@ in
       '';
     };
 
-    idleSuspendMinutes = mkOption {
-      type = types.ints.positive;
-      default = 10;
-      description = "Pause the emulator after this many minutes without use.";
-    };
-
-    idleHibernateMinutes = mkOption {
+    idleStopMinutes = mkOption {
       type = types.ints.positive;
       default = 60;
-      description = ''
-        Stop the emulator (saving Quick Boot state) after this many minutes
-        without use. This counts from the last use, not from the suspend.
-      '';
+      description = "Stop Android after this many minutes without use. The next use cold boots with existing userdata.";
     };
 
     memoryMiB = mkOption {
@@ -166,14 +168,8 @@ in
 
     quickBoot = mkOption {
       type = types.bool;
-      default = true;
-      description = ''
-        Save a Quick Boot snapshot at stop and restore it at start. When
-        false, the emulator gets -no-snapshot, so every start is a cold boot
-        and a stop writes no snapshot. Use false when snapshots do not load
-        on the host, for example with some "host" GPU setups. Suspend and
-        resume still work, because they only pause the guest.
-      '';
+      default = false;
+      description = "Compatibility option. Quick Boot is no longer supported; this must be false.";
     };
 
     gpu = mkOption {
@@ -208,8 +204,8 @@ in
       {
         assertions = [
           {
-            assertion = cfg.idleSuspendMinutes < cfg.idleHibernateMinutes;
-            message = "services.android-appliance.idleSuspendMinutes must be less than idleHibernateMinutes.";
+            assertion = !cfg.quickBoot;
+            message = "services.android-appliance.quickBoot is no longer supported. Remove it or set it to false; Android always cold boots.";
           }
         ];
 
@@ -297,12 +293,7 @@ in
                   cfg.gpu
                   "-feature"
                   (lib.concatStringsSep "," (
-                    # By default the emulator maps the guest RAM to the Quick
-                    # Boot ram.img file, so each guest RAM write becomes a
-                    # dirty page of that file. Low vm.dirty_bytes limits or a
-                    # slow disk then stop the guest CPUs until Android's
-                    # watchdog kills system_server. Keep the RAM anonymous;
-                    # a snapshot then saves the RAM at stop instead.
+                    # Keep guest RAM anonymous, including adopted AVDs.
                     [ "-QuickbootFileBacked" ]
                     # The old known-good Juno setup used -feature -Vulkan with
                     # host rendering; plain -gpu host tries Vulkan and fails
@@ -310,12 +301,11 @@ in
                     ++ lib.optionals hostGpu [ "-Vulkan" ]
                   ))
                 ]
-                ++ lib.optionals (!cfg.quickBoot) [ "-no-snapshot" ]
+                ++ [ "-no-snapshot" ]
               );
               # Wait for Android boot completion, so "activating" means "starting".
               ExecStartPost = "${ctl} boot-hook";
-              # `adb emu kill` saves the Quick Boot snapshot, unless quickBoot
-              # is false. stop-hook waits up to 90s; systemd sends
+              # stop-hook waits up to 90s; systemd sends
               # SIGTERM/SIGKILL after TimeoutStopSec.
               ExecStop = "${ctl} stop-hook";
               TimeoutStartSec = "20min";
@@ -337,7 +327,7 @@ in
         };
 
         systemd.services."${prefix}-idle" = {
-          description = "Suspend or stop the idle Android appliance";
+          description = "Stop the idle Android appliance";
           serviceConfig = commonService // {
             Type = "oneshot";
             ExecStart = "${ctl} idle-check";
@@ -360,10 +350,8 @@ in
         '';
       }
 
-      # Browser display: Xvnc (X server and VNC in one process) shows scrcpy,
-      # and noVNC serves it on loopback. The first connection to the socket
-      # starts the chain and Android. It all stops when the emulator stops.
-      (lib.mkIf cfg.display.enable {
+      # Host GPU rendering needs this X server even without a browser display.
+      (lib.mkIf (cfg.display.enable || cfg.gpu == "host") {
         systemd.services."${prefix}-xvnc" = {
           description = "Virtual display for the Android appliance";
           partOf = [ emulatorUnit ];
@@ -389,10 +377,14 @@ in
               "-nolisten"
               "tcp"
             ];
-            ExecStartPost = "${pkgs.bash}/bin/bash -c 'until [ -S ${vncSocket} ]; do ${pkgs.coreutils}/bin/sleep 0.2; done'";
+            ExecStartPost = "${pkgs.bash}/bin/bash -c 'until ${pkgs.xdpyinfo}/bin/xdpyinfo -display ${xDisplay} >/dev/null 2>&1 && [ -S ${vncSocket} ]; do ${pkgs.coreutils}/bin/sleep 0.2; done'";
+            TimeoutStartSec = "30s";
           };
         };
+      })
 
+      # The browser socket starts scrcpy/noVNC and Android on demand.
+      (lib.mkIf cfg.display.enable {
         systemd.services."${prefix}-scrcpy" = {
           description = "Android screen mirror for the appliance display";
           bindsTo = [
@@ -442,7 +434,7 @@ in
           wants = [ "${prefix}-scrcpy.service" ];
           partOf = [ emulatorUnit ];
           serviceConfig = commonService // {
-            # Resume a suspended emulator or queue the start of a stopped one.
+            # Queue the start of a stopped emulator.
             ExecStartPre = "${ctl} start --no-wait";
             ExecStart = lib.escapeShellArgs [
               (lib.getExe' pkgs.python3Packages.websockify "websockify")

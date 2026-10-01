@@ -26,7 +26,7 @@ def find_androidctl() -> Optional[str]:
     """Return the androidctl path. The Hermes service PATH can be narrow, so
     fall back to the NixOS system profile."""
     for candidate in (_configured, os.environ.get("ANDROIDCTL", ""), shutil.which("androidctl"), FALLBACK_PATH):
-        if candidate and os.access(candidate, os.X_OK):
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return None
 
@@ -41,6 +41,8 @@ def run(args: List[str], timeout: int = LONG_TIMEOUT) -> Dict[str, Any]:
         return {"ok": False, "error": "androidctl is not installed on this host"}
     try:
         proc = subprocess.run([exe, *args], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    except OSError as exc:
+        return {"ok": False, "error": f"cannot run androidctl: {exc}"}
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": f"androidctl {args[0]} timed out after {timeout}s"}
     result: Dict[str, Any] = {"ok": proc.returncode == 0, "output": proc.stdout.strip()}
@@ -69,11 +71,11 @@ def _int(description: str) -> Dict[str, Any]:
     return {"type": "integer", "description": description}
 
 
-_WAKE = " Starts or resumes Android first when it is stopped or suspended."
+_WAKE = " Starts Android first when it is stopped."
 
 STATUS = _schema(
     "android_status",
-    "Report the Android appliance state (stopped, starting, running, suspended, stopping), whether "
+    "Report the Android appliance state (stopped, starting, running, stopping), whether "
     "Android is ready (boot_completed=1) and the idle time. Never starts or wakes Android. For "
     "operations without a tool, run `androidctl` in the terminal; load skill "
     "android-appliance:android for the full command list.",
@@ -81,12 +83,12 @@ STATUS = _schema(
 )
 START = _schema(
     "android_start",
-    "Start Android (Quick Boot restore when possible) or resume it, and wait until it is usable.",
+    "Cold boot Android with its existing app data, and wait until it is usable.",
     {},
 )
 STOP = _schema(
     "android_stop",
-    "Shut Android down (saves its Quick Boot state, if enabled). Frees the host RAM. Idle Android stops by "
+    "Shut Android down, keeping its app data. Frees the host RAM. Idle Android stops by "
     "itself, so call this only when asked.",
     {},
 )

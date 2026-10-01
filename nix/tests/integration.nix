@@ -48,8 +48,7 @@ testPkgs.testers.runNixOSTest {
       memoryMiB = 2048;
       cores = 2;
       diskSize = "4G";
-      idleSuspendMinutes = 1;
-      idleHibernateMinutes = 2;
+      idleStopMinutes = 2;
     };
   };
 
@@ -109,43 +108,23 @@ testPkgs.testers.runNixOSTest {
         assert machine.succeed("androidctl status").startswith("state=running")
         machine.succeed(f"test $(stat -c %U {state_dir}/last-activity) = tony")
 
-    with subtest("suspend and resume"):
-        tony("androidctl suspend")
-        assert status().startswith("state=suspended"), status()
-        # status does not wake the emulator.
-        assert status().startswith("state=suspended"), status()
-        start = time.monotonic()
-        tony("androidctl resume")
-        elapsed = time.monotonic() - start
-        print(f"resume took {elapsed:.2f}s")
-        assert elapsed < 5, elapsed
-        assert status().startswith("state=running"), status()
-
-    with subtest("automation resumes a suspended emulator"):
-        tony("androidctl suspend")
-        tony("androidctl shell true")
-        assert status().startswith("state=running"), status()
-
-    with subtest("quick boot stop and restore"):
+    with subtest("cold boot after stop preserves userdata"):
+        tony("androidctl shell touch /data/local/tmp/appliance-persistence")
         tony("androidctl stop", timeout=300)
         machine.fail(f"systemctl is-active {emulator}")
         # The emulator waits up to 20s for a graceful shutdown. The bracketed
         # pattern stops pgrep from matching the test command itself.
         machine.wait_until_fails("pgrep -f '[q]emu-system-x86_64'", timeout=120)
         assert status().startswith("state=stopped"), status()
-        machine.succeed(f"test -d {state_dir}/avd/android.avd/snapshots/default_boot")
         start = time.monotonic()
         tony("androidctl start", timeout=900)
         elapsed = time.monotonic() - start
-        print(f"quick boot restore took {elapsed:.0f}s")
-        # A restored guest keeps its uptime from before the stop.
-        assert uptime() > elapsed + 20, (uptime(), elapsed)
+        print(f"cold boot took {elapsed:.0f}s")
+        assert uptime() < elapsed + 20, (uptime(), elapsed)
+        tony("androidctl shell test -f /data/local/tmp/appliance-persistence")
+        tony("androidctl shell rm -f /data/local/tmp/appliance-persistence")
 
-    with subtest("idle suspend"):
-        set_idle(70)
-        wait_state("suspended", timeout=120)
-
-    with subtest("idle hibernate"):
+    with subtest("idle shutdown"):
         set_idle(130)
         machine.wait_until_fails(f"systemctl is-active {emulator}", timeout=300)
         # The emulator waits up to 20s for a graceful shutdown. The bracketed

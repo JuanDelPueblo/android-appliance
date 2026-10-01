@@ -26,4 +26,4 @@ config_schema:
   display_url:
     type: str
     default: ""
-    description: "Browser display URL for the dashboard. Empty means the local URL from `androidctl display`."
+    description: "Browser display URL for the dashboard. Empty embeds the display through the authenticated Hermes dashboard URL."

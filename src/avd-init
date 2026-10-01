@@ -74,8 +74,8 @@ tag.id=$AVD_TAG
 tag.display=Google Play
 PlayStore.enabled=true
 disk.dataPartition.size=$AVD_DISK_SIZE
-fastboot.forceColdBoot=no
-fastboot.forceFastBoot=yes
+fastboot.forceColdBoot=yes
+fastboot.forceFastBoot=no
 hw.lcd.width=1080
 hw.lcd.height=1920
 hw.lcd.density=420
@@ -117,16 +117,16 @@ EOF
   fi
 fi
 
-# A changed value makes the emulator cold boot once instead of restoring the
-# Quick Boot snapshot. Userdata is kept.
+# Managed hardware and boot settings never replace userdata.
 set_key hw.ramSize "$AVD_RAM_MIB"
 set_key hw.cpu.ncore "$AVD_CORES"
 # The browser display is 1080x1920, so keep adopted AVDs at the same native
-# size instead of a stale low resolution. Userdata is kept; one cold boot.
+# size instead of a stale low resolution. Userdata is kept.
 set_key hw.lcd.width 1080
 set_key hw.lcd.height 1920
 set_key hw.lcd.density 420
 
-# Without a window there is no Quick Boot dialog, and the emulator does not
-# save the snapshot on exit unless this choice is set.
-echo "saveOnExit=true" >"$avd_dir/quickbootChoice.ini"
+# Disable snapshot restore/save for adopted AVDs as well as new ones.
+set_key fastboot.forceColdBoot yes
+set_key fastboot.forceFastBoot no
+echo "saveOnExit=false" >"$avd_dir/quickbootChoice.ini"

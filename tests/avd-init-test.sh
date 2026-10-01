@@ -15,7 +15,10 @@ config=$ANDROID_AVD_HOME/android.avd/config.ini
 grep -qx "path=$ANDROID_AVD_HOME/android.avd" "$ANDROID_AVD_HOME/android.ini"
 grep -qx "image.sysdir.1=$AVD_SYSTEM_IMAGE/" "$config"
 grep -qx "hw.ramSize=2048" "$config"
-grep -qx "saveOnExit=true" "$ANDROID_AVD_HOME/android.avd/quickbootChoice.ini"
+grep -qx "saveOnExit=false" "$ANDROID_AVD_HOME/android.avd/quickbootChoice.ini"
+
+grep -qx "fastboot.forceColdBoot=yes" "$config"
+grep -qx "fastboot.forceFastBoot=no" "$config"
 
 # The emulator rewrites config.ini as "key = value". An equal value stays.
 sed -i 's/^hw.ramSize=.*/hw.ramSize = 2048M/' "$config"

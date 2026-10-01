@@ -40,19 +40,20 @@ let
     };
   system = mkSystem { gpu = "swiftshader"; };
   systemHost = mkSystem { gpu = "host"; };
-  systemNoSnapshot = mkSystem {
+  systemHostNoDisplay = mkSystem {
     gpu = "host";
-    quickBoot = false;
+    display.enable = false;
   };
+  unitsHostNoDisplay = systemHostNoDisplay.config.systemd.services;
   units = system.config.systemd.services;
   unitsHost = systemHost.config.systemd.services;
   bootUnits = system.config.systemd.targets.multi-user.wants or [ ];
   emu = units.android-appliance-emulator;
   emuHost = unitsHost.android-appliance-emulator;
-  emuNoSnapshot = systemNoSnapshot.config.systemd.services.android-appliance-emulator;
   xvnc = units.android-appliance-xvnc;
   scrcpy = units.android-appliance-scrcpy;
   pythonEnv = pkgs.python3.withPackages (ps: [
+    ps.aiohttp
     ps.fastapi
     ps.httpx
     ps.pyyaml
@@ -76,6 +77,7 @@ in
           pkgs.gnugrep
           pkgs.gnused
           pkgs.gawk
+          pkgs.util-linux
         ];
       }
       ''
@@ -102,6 +104,7 @@ in
         patchShebangs tests
         python -m unittest discover -s tests -v
         node --check dashboard/dist/index.js
+        node --test tests/dashboard-test.js
         python -c 'import json; json.load(open("dashboard/manifest.json"))'
         touch $out
       '';
@@ -125,6 +128,12 @@ in
     assert builtins.match ".*--window-width=1080.*" scrcpy.serviceConfig.ExecStart != null;
     assert builtins.match ".*--window-height=1920.*" scrcpy.serviceConfig.ExecStart != null;
     assert builtins.match ".*--max-size=1920.*" scrcpy.serviceConfig.ExecStart != null;
+    # Host rendering still has its X server when browser viewing is disabled.
+    assert unitsHostNoDisplay ? android-appliance-xvnc;
+    assert !(unitsHostNoDisplay ? android-appliance-display);
+    assert !(unitsHostNoDisplay ? android-appliance-scrcpy);
+    assert xvnc.serviceConfig.TimeoutStartSec == "30s";
+    assert builtins.match ".*xdpyinfo.*" xvnc.serviceConfig.ExecStartPost != null;
     # Software rendering stays headless: no display, no X dependency.
     assert !(emu.environment ? DISPLAY);
     assert !(builtins.elem "android-appliance-xvnc.service" (emu.after or [ ]));
@@ -132,9 +141,9 @@ in
     assert (emu.serviceConfig.BindPaths or [ ]) == [ ];
     assert builtins.match ".*-gpu swiftshader.*" emu.serviceConfig.ExecStart != null;
     assert builtins.match ".*Vulkan.*" emu.serviceConfig.ExecStart == null;
-    # Guest RAM is never file-backed. Quick Boot stays on by default.
+    # Guest RAM is anonymous and snapshot load/save is always disabled.
     assert builtins.match ".*-feature -QuickbootFileBacked( .*)?" emu.serviceConfig.ExecStart != null;
-    assert builtins.match ".*-no-snapshot.*" emu.serviceConfig.ExecStart == null;
+    assert builtins.match ".*-no-snapshot.*" emu.serviceConfig.ExecStart != null;
     assert emu.serviceConfig.SupplementaryGroups == [ "kvm" ];
     # Host rendering gets the X display, ordering, socket bind, groups and
     # the known-good Vulkan-off flag.
@@ -147,9 +156,7 @@ in
     assert
       builtins.match ".*-feature -QuickbootFileBacked,-Vulkan( .*)?" emuHost.serviceConfig.ExecStart
       != null;
-    assert builtins.match ".*-no-snapshot.*" emuHost.serviceConfig.ExecStart == null;
-    # quickBoot = false turns off snapshot load and save.
-    assert builtins.match ".* -no-snapshot( .*)?" emuNoSnapshot.serviceConfig.ExecStart != null;
+    assert builtins.match ".*-no-snapshot.*" emuHost.serviceConfig.ExecStart != null;
     assert builtins.elem "render" emuHost.serviceConfig.SupplementaryGroups;
     assert builtins.elem "video" emuHost.serviceConfig.SupplementaryGroups;
     pkgs.writeText "module-eval" (

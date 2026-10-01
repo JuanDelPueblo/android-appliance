@@ -1,9 +1,9 @@
 # android-appliance
 
 A NixOS module and a Hermes plugin for one persistent Android Emulator
-device. Android starts on demand, suspends when idle, and stops with its
-Quick Boot state saved after longer idle time. `androidctl` is the stable
-interface for humans and agents. A browser shows the device screen through
+device. Android cold boots on demand and shuts down when idle, keeping
+its apps, accounts and userdata. Suspend/resume and Quick Boot are removed.
+`androidctl` is the stable interface for humans and agents. A browser shows the device screen through
 scrcpy and noVNC.
 
 ## Architecture
@@ -12,12 +12,11 @@ scrcpy and noVNC.
              androidctl  (CLI for humans, agents, Hermes tools, dashboard)
                  │
    ┌─────────────┼──────────────────────────────┐
-   │ systemctl start/stop     adb emu avd stop/start, adb shell ...
+   │ systemctl start/stop     adb shell ...
    ▼                              ▼
 android-appliance-emulator.service ──► Android Emulator (headless, -no-window)
    │ ExecStartPost: wait for boot       ▲
-   │ ExecStop: adb emu kill (saves      │ adb
-   │           Quick Boot state)        │
+   │ ExecStop: adb emu kill             │ adb
    │                                    │
    ├─► android-appliance-idle.timer ──► androidctl idle-check (every 30 s)
    │
@@ -36,19 +35,13 @@ The design uses native parts only:
   and then waits independently, so Ctrl-C stops waiting without tearing
   down an otherwise valid start. The unit keeps its `ExecStartPost`
   boot wait, so `activating` still means starting.
-- **Suspend** uses the emulator console (`adb emu avd stop`). The guest
-  RAM stays in memory and the vCPUs stop. **Resume** uses
-  `adb emu avd start`.
-- **Stop** uses `adb emu kill`, the normal emulator shutdown path. It saves
-  the Quick Boot snapshot, unless `quickBoot` is `false`. `stop-hook` waits
-  up to 90 seconds, then returns so systemd can SIGTERM; the outer
-  `TimeoutStopSec` is 3 minutes.
-- **Guest RAM** is always anonymous memory. The emulator gets
-  `-feature -QuickbootFileBacked`. By default the emulator maps the guest
-  RAM to the Quick Boot `ram.img` file, so each guest RAM write becomes a
-  dirty page of that file. On a slow disk or with low `vm.dirty_bytes`
-  limits, the kernel then stops the guest until Android's watchdog kills
-  `system_server`. A snapshot saves the whole RAM at stop instead.
+- **Start** always uses `-no-snapshot`. Existing apps, accounts and userdata
+  survive shutdown, but guest RAM and running processes do not.
+- **Stop** uses `adb emu kill`, the normal emulator shutdown path, without
+  snapshot saving. `stop-hook` waits up to 90 seconds, then systemd can
+  send SIGTERM; the outer `TimeoutStopSec` is 3 minutes.
+- **Guest RAM** stays anonymous with `-feature -QuickbootFileBacked`,
+  including when adopting an AVD that previously used snapshots.
 - **Idle policy** is a timestamp file and a systemd timer. The timer is
   bound to the emulator unit, so nothing runs while Android is stopped.
 - **Display** is Xvnc at 1080x1920 (the device native size), scrcpy, and
@@ -68,7 +61,6 @@ NixOS:
 
 Android:
   AVD/userdata
-  Quick Boot state
 
 Hermes:
   plugin enablement
@@ -123,18 +115,20 @@ Requirements:
 | `stateDir` | `/var/lib/android-appliance` | Persistent appliance directory. |
 | `avdName` | `android` | AVD name. |
 | `apiLevel` | `36` | Android API level of the system image. |
-| `idleSuspendMinutes` | `10` | Pause Android after this idle time. |
-| `idleHibernateMinutes` | `60` | Stop Android after this idle time, counted from the last use. |
+| `idleStopMinutes` | `60` | Shut Android down after this idle time. The next use cold boots. |
 | `memoryMiB` | `4096` | Guest RAM. |
 | `cores` | `4` | Guest CPU cores. |
 | `diskSize` | `32G` | Userdata size. It applies only when the AVD is created. |
-| `quickBoot` | `true` | Save a Quick Boot snapshot at stop and restore it at start. `false` passes `-no-snapshot`: every start is a cold boot, and a stop writes no snapshot. Use `false` when snapshots do not load on the host. Suspend and resume still work. |
+| `quickBoot` | `false` | Compatibility option: it must remain `false`. Snapshot load/save is always disabled. |
 | `gpu` | `swiftshader` | Emulator `-gpu` mode. The default software renderer works on every headless host. `host` needs a usable GPU and EGL; it uses the appliance X server (`:57`), adds `render`/`video` groups, binds only `/tmp/.X11-unix`, and passes `-feature -Vulkan` to match the known-good Juno setup. |
-| `display.enable` | `true` | Serve the browser display at 1080x1920. |
+| `display.enable` | `true` | Serve the browser display at 1080x1920. Host GPU mode keeps its X server even when browser viewing is disabled. |
 | `display.port` | `6090` | Loopback port of the noVNC page. |
 
-A change to `memoryMiB`, `cores`, or the fixed 1080x1920 display size makes
-the next start a cold boot. The userdata stays.
+Every start is a cold boot. Hardware setting changes preserve userdata.
+
+For existing configurations, remove `idleSuspendMinutes` and rename
+`idleHibernateMinutes` to `idleStopMinutes` (the old name remains an alias).
+Remove `quickBoot` or keep it `false`; `true` fails module validation.
 
 The system image is Android 16 (API 36), Google APIs with Play Store,
 x86_64. Set `apiLevel` to pick another level for a new or adopted AVD.
@@ -198,10 +192,8 @@ WARNING: Step 2 deletes all apps, accounts and data on the device.
 
 ```text
 androidctl status                        state, boot readiness, idle time
-androidctl start [--no-wait]             start or resume, then wait until usable
-androidctl stop                          shut down (saves Quick Boot state if enabled)
-androidctl suspend                       pause and keep RAM
-androidctl resume                        continue after suspend
+androidctl start [--no-wait]             cold boot, then wait until usable
+androidctl stop                          shut down, keeping apps and userdata
 androidctl restart [--no-wait]           stop, then start
 androidctl wait                          block until the current boot completes
 androidctl display                       print the local browser display URL
@@ -218,8 +210,8 @@ androidctl push <local> <remote>
 androidctl pull <remote> <local>
 ```
 
-The automation commands start or resume Android when necessary and update
-the activity time. `status`, `wait`, `stop`, `suspend` and `display` do
+The automation commands start Android when necessary and update
+the activity time. `status`, `wait`, `stop` and `display` do
 not update the activity time. `status` never starts or wakes Android.
 
 Exit status: `0` for success, `1` for an error, `2` for a usage error.
@@ -234,8 +226,7 @@ as the configured user.
 | `stopped` | The emulator unit is inactive. No emulator process and no guest RAM. |
 | `starting` | The unit is active or activating, but Android has not finished its boot. |
 | `running` | Android reports `sys.boot_completed=1`. |
-| `suspended` | The emulator is paused. The guest RAM stays in host memory. |
-| `stopping` | The unit shuts down Android (and saves Quick Boot state, if enabled) and exits. |
+| `stopping` | The unit shuts down Android and exits. |
 
 Example:
 
@@ -248,24 +239,16 @@ state=running boot_completed=1 idle_seconds=42
 
 ```text
 running
-  │  idleSuspendMinutes without use
+  │  idleStopMinutes without use
   ▼
-suspended
-  │  idleHibernateMinutes without use (total, from the last use)
-  ▼
-stopped (with Quick Boot state saved, if quickBoot is true)
+stopped (apps and userdata preserved)
 ```
 
-"Use" is one of these:
-
-- An `androidctl` automation or lifecycle command (not `status`).
-- Keyboard or mouse input in the browser display.
-- A new connection to the browser display.
-
-Display input also resumes an Android that is suspended (in 30 seconds or
-less). An open browser tab without input does not keep Android active. The
-system never starts a stopped Android because of idle policy. A new command
-or a new browser connection starts it.
+"Use" is an automation command, Start or Restart, browser display input,
+or a new display connection. Status polling and an open tab without input
+do not keep Android running. The idle timer skips shutdown while a CLI
+operation is in progress, and boot completion refreshes the activity time.
+A new command or display connection cold boots a stopped Android.
 
 The activity time is the modification time of `stateDir/last-activity`.
 
@@ -278,7 +261,7 @@ emulator window and no emulator tool panel.
   (`androidctl display` prints it).
 - The page listens only on loopback. Put a reverse proxy with
   authentication in front of it to use it from another host.
-- The first connection starts or resumes Android. The screen is black until
+- The first connection starts Android. The screen is black until
   Android is ready.
 - When Android stops for idle time, the page shows "Disconnected". Reload
   the page to start Android again.
@@ -303,21 +286,39 @@ The plugin provides:
   `android_text` and `android_key`. Each tool runs one `androidctl`
   command.
 - An **Android** dashboard tab with the state, the boot readiness, and the
-  buttons Start, Suspend, Resume, Stop, Restart and Open Display.
+  buttons Start, Stop, Restart and Show Display. The device view embeds
+  inside the tab, with Reload Display and Hide Display controls.
 
 The plugin finds `androidctl` on `PATH`, then at
 `/run/current-system/sw/bin/androidctl`. Optional plugin settings are in
 the Hermes configuration:
 
 ```bash
-# Use this URL for "Open Display", for example a reverse proxy URL.
-hermes config set plugins.entries.android-appliance.settings.display_url https://android.example.net/vnc.html?autoconnect=true&resize=scale
+# Optional: use an existing authenticated reverse proxy for the embedded view.
+hermes config set plugins.entries.android-appliance.settings.display_url 'https://android.example.net/vnc.html?autoconnect=true&resize=scale'
 # Use a different androidctl.
 hermes config set plugins.entries.android-appliance.settings.androidctl /path/to/androidctl
 ```
 
+With no `display_url` override, a dashboard with native cookie authentication
+serves noVNC and its WebSocket through the dashboard's own URL. Remote
+browsers never receive the host's loopback address. The bridge connects only
+to the loopback URL from `androidctl display`, forwards no Hermes credentials,
+and requires a short-lived, single-use ticket for the WebSocket upgrade.
+
+Legacy token-only dashboards can use the direct display when browsing on
+localhost. Remote token-only dashboards need an explicit authenticated
+`display_url`. An HTTPS dashboard needs an HTTPS display. An external URL
+must allow iframe embedding (its CSP/frame headers and login cookies must
+permit it); the default same-origin view avoids that cross-site constraint.
+
+Show Display starts Android on demand. After an idle shutdown, use Reload
+Display to start it again. Automatic reconnect is off so an idle tab does
+not repeatedly start Android.
+
 The Hermes process must run as the appliance user (or as root) to operate
-Android.
+Android. The dashboard and display HTTP routes use Hermes authentication;
+the reverse proxy must support WebSocket upgrades.
 
 ## Permissions
 
@@ -339,13 +340,13 @@ app state:
 
 | Path | Content |
 |---|---|
-| `stateDir/avd/` | AVD configuration, userdata and the Quick Boot snapshot. This is the important data. |
+| `stateDir/avd/` | AVD configuration and userdata. This is the important data. |
 | `stateDir/home/` | adb keys and emulator settings. |
 | `stateDir/screenshots/` | Default screenshot location. You can skip it. |
 
 Stop Android (`androidctl stop`) before a backup, because the emulator
-changes the userdata image while it runs. You can skip
-`stateDir/avd/*.avd/snapshots/`: without it, the next start is a cold boot.
+changes the userdata image while it runs. Old `snapshots/` directories
+are ignored and do not need to be backed up.
 
 ## Troubleshooting
 
@@ -361,7 +362,7 @@ journalctl -u android-appliance-scrcpy -u android-appliance-display -b
 |---|---|
 | `start` fails at once | Look for KVM errors in the log. Make sure that `/dev/kvm` exists. |
 | `start` waits a long time on the first run | The first boot is a cold boot that creates userdata. Wait up to 20 minutes on slow hosts. |
-| Every start is a cold boot | With `quickBoot = false`, this is normal. Otherwise, the snapshot did not save or did not load. Look for errors near `emu kill` and "Failed to load snapshot" in the log. A `memoryMiB`, `cores`, or display-size change also causes one cold boot. If snapshots never load on the host, set `quickBoot = false`. |
+| Every start is a cold boot | Expected: snapshot load/save is disabled. Apps and accounts remain in userdata. |
 | "System UI isn't responding", ANRs, `system_server` restarts | The guest does not get CPU or disk time. Make sure that the log shows "Feature 'QuickbootFileBacked' ... overridden to 'disabled'". Keep `stateDir` on a fast local disk. |
 | `state=starting` does not change | Android did not finish its boot. `start` waits with `--no-block`, so Ctrl-C only stops waiting. If the unit died, `start` reports it; otherwise run `androidctl restart`. Look at the emulator log. |
 | `device unauthorized` | The AVD trusts another adb key. `start` fails fast with this diagnostic. Copy the old key into `stateDir/home/.android/` (see adopting an AVD), then restart. The appliance uses its own adb server on port 5038; do not start another server with the same port. |
@@ -394,11 +395,15 @@ hermes plugins doctor . --ci       # Hermes runtime contract checks
 - ShellCheck on the scripts.
 - Lifecycle tests for `androidctl` with fake `systemctl`, `adb` and
   `xprintidle` commands, including `--no-block` start, unit-dies,
-  unauthorized, offline-timeout, and bounded stop-hook cases. They need
+  unauthorized, offline-timeout, bounded stop-hook, stale UI dump, failed
+  screenshot preservation and in-flight idle protection cases. They need
   no KVM.
 - `avd-init` tests, including stale registry-path refusal, registry
   recreation, and native-resolution enforcement.
-- Python tests for the Hermes tools and the dashboard backend.
+- Python tests for the Hermes tools and dashboard backend, including real
+  loopback HTTP/WebSocket proxy traffic and ticket rejection/replay checks.
+- Dashboard JavaScript tests for serial polling, persistent action errors,
+  embedded display URLs and removed controls.
 - An evaluation of NixOS systems with the module, for both software and
   host GPU. It asserts that the emulator is not part of a boot target,
   that host mode has `DISPLAY`, Xvnc ordering, the X socket bind,
@@ -408,8 +413,7 @@ hermes plugins doctor . --ci       # Hermes runtime contract checks
 
 The integration test boots Android in a VM and checks these items: Android
 off after boot, narrow permissions, fresh AVD creation, cold start, boot
-completion, adb commands, screenshot, suspend, near-instant resume, Quick
-Boot stop and restore, idle suspend, idle hibernate, the browser display,
+completion, adb commands, screenshot, shutdown and cold boot, idle shutdown, the browser display,
 and a host reboot with Android off.
 
 ### Manual validation
@@ -423,33 +427,19 @@ Do these steps on a real host after the module is deployed:
    returns and `androidctl status` shows `state=running boot_completed=1`.
 3. **ADB command**: Run `androidctl shell getprop ro.build.version.release`.
 4. **Screenshot**: Run `androidctl screenshot` and open the PNG.
-5. **Suspend**: Run `androidctl suspend`. Make sure that the status is
-   `suspended` and that the emulator CPU use is near zero (`top`).
-6. **Resume**: Run `time androidctl resume`. It must take less than one
-   second.
-7. **Quick Boot stop**: Run `androidctl stop`. Make sure that no
-   `qemu-system` process exists and that
-   `stateDir/avd/android.avd/snapshots/default_boot` exists.
-8. **Quick Boot restore**: Run `time androidctl start`. It must take
-   seconds, not minutes. `journalctl -u android-appliance-emulator` must
-   not show a cold boot.
-9. **Idle suspend**: Do not use Android for `idleSuspendMinutes`. Make sure
-   that the status is `suspended`.
-10. **Idle hibernate**: Do not use Android for `idleHibernateMinutes`. Make
-    sure that the status is `stopped` and that the RAM is free.
-11. **Browser display**: Open the display URL through an SSH tunnel or a
-    reverse proxy. Make sure that only the device screen shows and that
-    taps and keys work.
-12. **Hermes plugin install**: Run `hermes plugins install
-    JuanDelPueblo/android-appliance` and `hermes plugins enable
-    android-appliance`. Restart Hermes.
-13. **Hermes tool invocation**: Ask Hermes for the Android status and a
-    screenshot. Make sure that it uses `android_status` and
-    `android_screenshot`.
-14. **Dashboard controls**: Open the **Android** tab. Use each button and
-    make sure that the state changes.
-15. **Host reboot**: Reboot the host. Make sure that `androidctl status`
-    shows `state=stopped` after the boot.
+5. **Shutdown and persistent data**: Keep a harmless file in Android's
+   `/data/local/tmp`, stop Android, then start it. Confirm a cold boot,
+   `state=running`, and that the file still exists.
+6. **Idle shutdown**: Leave Android unused for `idleStopMinutes`. Confirm
+   `state=stopped` and that the emulator process has exited.
+7. **Browser display**: Open the display through an SSH tunnel or an
+   authenticated reverse proxy. Check screen rendering, taps and keys.
+8. **Hermes plugin**: Install and enable the plugin, then restart Hermes.
+   Ask it for the Android status and a screenshot.
+9. **Dashboard**: Open the Android tab. Test Start, Stop, Restart and
+   Show Display. Confirm the embedded view loads on a remote browser
+   through HTTPS, including taps and Reload Display after shutdown.
+10. **Host reboot**: Confirm Android remains stopped after reboot.
 
 ## License
 
