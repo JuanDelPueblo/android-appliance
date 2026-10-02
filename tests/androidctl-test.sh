@@ -22,6 +22,8 @@ setup() {
   export ANDROID_APPLIANCE_IDLE_STOP=3600
   export ANDROID_APPLIANCE_BOOT_TIMEOUT=5
   unset ANDROID_APPLIANCE_USER
+  # Keep the tests independent of any host configuration file.
+  export ANDROID_APPLIANCE_CONFIG=/nonexistent-android-appliance-test
 }
 
 running() {

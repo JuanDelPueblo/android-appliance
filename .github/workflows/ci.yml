@@ -6,12 +6,22 @@ on:
   pull_request:
 
 jobs:
-  flake-check:
+  unit-tests:
     runs-on: ubuntu-latest
+    container: fedora:44
     steps:
       - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v31
-      - run: nix flake check
+      - name: Install the test dependencies
+        run: >
+          dnf install -y --setopt=install_weak_deps=False
+          bash coreutils grep sed gawk util-linux
+          shellcheck systemd polkit
+          python3 python3-aiohttp python3-fastapi python3-httpx python3-pyyaml nodejs
+          tigervnc-x11-server xdpyinfo scrcpy python3-websockify novnc libXScrnSaver
+      - name: Install the appliance
+        run: ./install.sh
+      - name: Run the tests
+        run: ./run-tests.sh
 
   hermes-plugin:
     runs-on: ubuntu-latest

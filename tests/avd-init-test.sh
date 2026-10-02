@@ -6,7 +6,11 @@ here=$(cd "$(dirname "$0")" && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-export HOME=$tmp/home ANDROID_AVD_HOME=$tmp/avd AVD_NAME=android AVD_API=36
+# Keep the test independent of any host configuration file. avd-init
+# forces HOME into the state directory, so point that at the temp tree.
+export ANDROID_APPLIANCE_CONFIG=/nonexistent-android-appliance-test
+export ANDROID_APPLIANCE_STATE_DIR=$tmp/state
+export HOME=$tmp/state/home ANDROID_AVD_HOME=$tmp/avd AVD_NAME=android AVD_API=36
 export AVD_SYSTEM_IMAGE=system-images/android-36/google_apis_playstore/x86_64
 export AVD_TAG=google_apis_playstore AVD_RAM_MIB=2048 AVD_CORES=2 AVD_DISK_SIZE=4G
 config=$ANDROID_AVD_HOME/android.avd/config.ini
@@ -44,7 +48,7 @@ AVD_API=35 AVD_SYSTEM_IMAGE=system-images/android-35/google_apis_playstore/x86_6
   exit 1
 }
 grep -q "Existing AVD uses android-36\|existing AVD 'android' uses" "$tmp/out"
-grep -q "apiLevel does not upgrade existing AVDs" "$tmp/out"
+grep -q "does not upgrade existing AVDs" "$tmp/out"
 [ "$(cat "$config")" = "$before" ]
 
 # The matching API level is adopted unchanged.

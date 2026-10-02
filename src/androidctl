@@ -3,9 +3,14 @@
 #
 # systemd owns the emulator process. This script only asks systemd to start
 # or stop the unit. Every start is a cold boot; userdata stays persistent.
-# All configuration comes from ANDROID_APPLIANCE_* variables that the NixOS
-# module sets in the installed wrapper.
+# Configuration comes from ANDROID_APPLIANCE_* variables, then from
+# /etc/android-appliance/appliance.conf, then from the built-in defaults.
 set -euo pipefail
+
+# Read the appliance configuration into the environment.
+self=$(readlink -f "${BASH_SOURCE[0]}")
+# shellcheck source=src/appliance-env
+source "$(dirname "$self")/appliance-env"
 
 state_dir=${ANDROID_APPLIANCE_STATE_DIR:-/var/lib/android-appliance}
 unit=${ANDROID_APPLIANCE_UNIT:-android-appliance-emulator.service}
@@ -16,7 +21,7 @@ boot_timeout=${ANDROID_APPLIANCE_BOOT_TIMEOUT:-900}
 stop_hook_timeout=${ANDROID_APPLIANCE_STOP_HOOK_TIMEOUT:-90}
 display_url=${ANDROID_APPLIANCE_DISPLAY_URL:-}
 x_display=${ANDROID_APPLIANCE_X_DISPLAY:-}
-xprintidle_bin=${ANDROID_APPLIANCE_XPRINTIDLE:-xprintidle}
+xprintidle_bin=${ANDROID_APPLIANCE_XPRINTIDLE:-$(dirname "$self")/display-idle}
 appliance_user=${ANDROID_APPLIANCE_USER:-}
 
 # Root would create root-owned files in the state directory and start an

@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from typing import Any, Dict, List, Optional
 
-FALLBACK_PATH = "/run/current-system/sw/bin/androidctl"
+FALLBACK_PATH = "/usr/local/bin/androidctl"
 
 # A cold boot of a fresh AVD can take several minutes.
 LONG_TIMEOUT = 1200
@@ -24,7 +24,7 @@ def configure(path: Optional[str]) -> None:
 
 def find_androidctl() -> Optional[str]:
     """Return the androidctl path. The Hermes service PATH can be narrow, so
-    fall back to the NixOS system profile."""
+    fall back to the system install location."""
     for candidate in (_configured, os.environ.get("ANDROIDCTL", ""), shutil.which("androidctl"), FALLBACK_PATH):
         if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate

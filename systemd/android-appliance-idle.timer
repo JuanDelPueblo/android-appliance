@@ -1,0 +1,12 @@
+[Unit]
+Description=Idle policy for the Android appliance
+BindsTo=android-appliance-emulator.service
+After=android-appliance-emulator.service
+
+[Timer]
+OnActiveSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

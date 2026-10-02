@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# display-scrcpy: mirror the device screen into the appliance X display.
+# This is the ExecStart of android-appliance-scrcpy.service. The screen
+# is the device native size, so scrcpy fills it with no downscale.
+set -euo pipefail
+
+self=$(readlink -f "${BASH_SOURCE[0]}")
+# shellcheck source=src/appliance-env
+source "$(dirname "$self")/appliance-env"
+
+# adb keys and the adb server port must match the emulator unit.
+export HOME=$ANDROID_APPLIANCE_STATE_DIR/home
+export ADB=${ANDROID_APPLIANCE_ADB:-adb}
+export DISPLAY=${ANDROID_APPLIANCE_X_DISPLAY:-:57}
+
+exec /usr/bin/scrcpy \
+  --serial="$ANDROID_APPLIANCE_SERIAL" \
+  --no-audio \
+  --window-title=Android \
+  --window-borderless \
+  --window-x=0 \
+  --window-y=0 \
+  --window-width=1080 \
+  --window-height=1920 \
+  --max-size=1920 \
+  --max-fps=30 \
+  --video-bit-rate=4M \
+  --render-driver=software

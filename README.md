@@ -1,7 +1,8 @@
 # android-appliance
 
-A NixOS module and a Hermes plugin for one persistent Android Emulator
-device. Android cold boots on demand and shuts down when idle, keeping
+A NixOS module, a standalone installer for systemd hosts (Fedora
+Server and similar), and a Hermes plugin for one persistent Android
+Emulator device. Android cold boots on demand and shuts down when idle, keeping
 its apps, accounts and userdata. Suspend/resume and Quick Boot are removed.
 `androidctl` is the stable interface for humans and agents. A browser shows the device screen through
 scrcpy and noVNC.
@@ -135,28 +136,73 @@ x86_64. Set `apiLevel` to pick another level for a new or adopted AVD.
 The screen is 1080x1920 at 420 dpi.
 
 `apiLevel` does not upgrade an existing AVD. If `stateDir/avd` already
-holds an AVD, `avd-init` checks its system image against the option. A
-mismatch stops the start with an explicit error, and does not touch the
-AVD. To change the level, either set `apiLevel` to the level of the
-existing AVD, or delete the AVD and let `avd-init` create a new one.
+holds an AVD, `avd-init` checks its system image against the configured
+level. A mismatch stops the start with an explicit error, and does not
+touch the AVD. To change the level, either set `apiLevel` (NixOS) or
+`APPLIANCE_API_LEVEL` (Fedora) to the level of the existing AVD, or
+delete the AVD and let `avd-init` create a new one.
 
 ```text
 avd-init: existing AVD 'android' uses 'system-images/android-36/...', but
-avd-init: services.android-appliance.apiLevel is 35 (...).
-avd-init: apiLevel does not upgrade existing AVDs; use the matching level or recreate the AVD.
+avd-init: APPLIANCE_API_LEVEL in /etc/android-appliance/appliance.conf is 35 (...).
+avd-init: APPLIANCE_API_LEVEL does not upgrade existing AVDs; use the matching level or recreate the AVD.
 ```
 
 `avd-init` also refuses a stale registry path. The emulator follows
 `path=` in `stateDir/avd/<name>.ini`; if that points outside the expected
 `stateDir/avd/<name>.avd` (for example after moving `stateDir`), the start
-stops instead of inspecting one AVD while launching another. Point
-`stateDir` at the live tree. A missing registry file is recreated.
+stops instead of inspecting one AVD while launching another. Point the
+state directory at the live tree. A missing registry file is recreated.
 
 ```text
 avd-init: registry '/var/lib/juno/android/avd/android.ini' points to '/srv/pool/vms/android/avd/android.avd',
-avd-init: but services.android-appliance.stateDir expects '/var/lib/juno/android/avd/android.avd'.
+avd-init: but APPLIANCE_STATE_DIR in /etc/android-appliance/appliance.conf expects '/var/lib/juno/android/avd/android.avd'.
 avd-init: refusing to inspect one AVD while the emulator would launch another.
 ```
+
+## Install on Fedora Server (or another systemd distribution)
+
+The appliance also installs without Nix, with its own installer.
+
+1. Install the operating-system packages:
+
+   ```bash
+   dnf install tigervnc-x11-server xdpyinfo scrcpy python3-websockify novnc \
+     libXScrnSaver polkit
+   ```
+
+2. Install the Android SDK. The emulator and the system image are not in
+   the Fedora repositories:
+
+   ```bash
+   sudo ./scripts/provision-sdk.sh
+   ```
+
+3. Copy and edit the configuration. The keys match the options above:
+   `APPLIANCE_STATE_DIR` is `stateDir`, `APPLIANCE_API_LEVEL` is
+   `apiLevel`, `APPLIANCE_IDLE_STOP_MINUTES` is `idleStopMinutes`, and
+   so on.
+
+   ```bash
+   sudo install -Dm644 conf/appliance.conf.example /etc/android-appliance/appliance.conf
+   sudoedit /etc/android-appliance/appliance.conf
+   ```
+
+4. Install and start. The installer also creates the configuration file
+   from the example when it is missing, then applies it.
+
+   ```bash
+   sudo ./install.sh
+   androidctl start
+   ```
+
+`install.sh` is idempotent: run it again after a configuration change.
+It installs the scripts under `/usr/local`, the unit files under
+`/etc/systemd/system` with a deployment drop-in, the tmpfiles rule and
+the polkit rule. `tests/smoke.sh` runs an end-to-end check on the
+installed host. The idle display input uses `display-idle`, a small
+Python helper that needs `libXScrnSaver`, because Fedora does not
+package `xprintidle`.
 
 ## Adopting an AVD from another appliance
 
@@ -290,7 +336,7 @@ The plugin provides:
   inside the tab, with Reload Display and Hide Display controls.
 
 The plugin finds `androidctl` on `PATH`, then at
-`/run/current-system/sw/bin/androidctl`. Optional plugin settings are in
+`/usr/local/bin/androidctl`. Optional plugin settings are in
 the Hermes configuration:
 
 ```bash
@@ -387,9 +433,19 @@ For device commands, use `androidctl shell <command>`.
 ```bash
 nix flake check                    # lint, unit tests, module evaluation
 nix build .#integration-test -L    # real emulator in a NixOS VM (KVM, nested)
+./run-tests.sh                     # no KVM: lint, bash tests, unit checks,
+                                   # staged install, plugin and dashboard tests
+./tests/smoke.sh                   # installed host with KVM: real emulator
 hermes plugins validate .          # Hermes admission checks
 hermes plugins doctor . --ci       # Hermes runtime contract checks
 ```
+
+`run-tests.sh` runs ShellCheck, the `androidctl` lifecycle tests with
+fake `systemctl`, `adb` and idle commands, the `avd-init` tests, the
+configuration-loader tests, the unit-file checks, a staged installation
+test, the Hermes plugin tests and the dashboard tests. It needs no KVM.
+It reports a SKIP when a tool such as shellcheck, node or a Python
+module is not installed.
 
 `nix flake check` runs:
 

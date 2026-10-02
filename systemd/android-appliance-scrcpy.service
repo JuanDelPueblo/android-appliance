@@ -1,0 +1,16 @@
+[Unit]
+Description=Android screen mirror for the appliance display
+BindsTo=android-appliance-emulator.service android-appliance-xvnc.service
+After=android-appliance-emulator.service android-appliance-xvnc.service
+StartLimitIntervalSec=0
+
+[Service]
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ExecStart=/usr/local/libexec/android-appliance/display-scrcpy
+Restart=always
+RestartSec=2
+
+# User, Group and ReadWritePaths are set by the 50-appliance.conf
+# drop-in that install.sh writes.

@@ -64,6 +64,8 @@ let
   androidEnv = {
     ANDROID_HOME = sdkRoot;
     ANDROID_SDK_ROOT = sdkRoot;
+    # avd-init keeps HOME inside the state directory.
+    ANDROID_APPLIANCE_STATE_DIR = cfg.stateDir;
     ANDROID_AVD_HOME = "${cfg.stateDir}/avd";
     ANDROID_USER_HOME = "${cfg.stateDir}/home/.android";
     ANDROID_ADB_SERVER_PORT = adbServerPort;

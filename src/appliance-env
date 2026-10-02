@@ -1,0 +1,83 @@
+# shellcheck shell=bash
+# appliance-env: shared configuration for the appliance scripts.
+#
+# Source this file, do not run it. It fills unset variables from the
+# configuration file and then derives the runtime environment.
+#
+# Precedence: an exported variable, then an APPLIANCE_* key in
+# /etc/android-appliance/appliance.conf, then the defaults below.
+
+# Tests and staged installs can point this elsewhere.
+config_file=${ANDROID_APPLIANCE_CONFIG:-/etc/android-appliance/appliance.conf}
+
+# Fill unset variables from KEY=value lines of the configuration file.
+# The format is strict: one key per line, no spaces and no quotes.
+if [ -f "$config_file" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+      '' | '#'*) continue ;;
+      *=*)
+        key=${line%%=*}
+        value=${line#*=}
+        case $key in
+          '' | [0-9]* | *[!A-Za-z0-9_]*) continue ;;
+        esac
+        if [ -z "${!key:-}" ]; then
+          printf -v "$key" '%s' "$value"
+        fi
+        ;;
+    esac
+  done < "$config_file"
+fi
+
+# The APPLIANCE_* keys come from the configuration file or the
+# environment; their defaults match conf/appliance.conf.example.
+ANDROID_APPLIANCE_STATE_DIR=${ANDROID_APPLIANCE_STATE_DIR:-${APPLIANCE_STATE_DIR:-/var/lib/android-appliance}}
+ANDROID_APPLIANCE_USER=${ANDROID_APPLIANCE_USER:-${APPLIANCE_USER:-}}
+ANDROID_APPLIANCE_UNIT=${ANDROID_APPLIANCE_UNIT:-android-appliance-emulator.service}
+ANDROID_APPLIANCE_IDLE_STOP=${ANDROID_APPLIANCE_IDLE_STOP:-$((${APPLIANCE_IDLE_STOP_MINUTES:-60} * 60))}
+
+# Fixed internal values. Callers use androidctl and never see them.
+ANDROID_APPLIANCE_SERIAL=${ANDROID_APPLIANCE_SERIAL:-emulator-5554}
+ANDROID_ADB_SERVER_PORT=${ANDROID_ADB_SERVER_PORT:-5038}
+
+# The SDK root gives the adb path and the emulator binary.
+if [ -n "${APPLIANCE_ANDROID_HOME:-}" ]; then
+  ANDROID_HOME=${ANDROID_HOME:-$APPLIANCE_ANDROID_HOME}
+  ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-$ANDROID_HOME}
+  ANDROID_APPLIANCE_ADB=${ANDROID_APPLIANCE_ADB:-$ANDROID_HOME/platform-tools/adb}
+fi
+ANDROID_APPLIANCE_ADB=${ANDROID_APPLIANCE_ADB:-adb}
+
+# The browser display. Without APPLIANCE_DISPLAY_ENABLED no display is
+# configured, so the built-in default stays "no display".
+if [ -z "${ANDROID_APPLIANCE_DISPLAY_URL:-}" ]; then
+  case ${APPLIANCE_DISPLAY_ENABLED:-} in
+    1 | true | yes)
+      display_port=${APPLIANCE_DISPLAY_PORT:-6090}
+      ANDROID_APPLIANCE_DISPLAY_URL="http://127.0.0.1:$display_port/vnc.html?autoconnect=true&resize=scale"
+      ANDROID_APPLIANCE_X_DISPLAY=${ANDROID_APPLIANCE_X_DISPLAY:-:57}
+      ;;
+  esac
+fi
+
+# AVD and appliance home paths.
+ANDROID_AVD_HOME=${ANDROID_AVD_HOME:-$ANDROID_APPLIANCE_STATE_DIR/avd}
+ANDROID_USER_HOME=${ANDROID_USER_HOME:-$ANDROID_APPLIANCE_STATE_DIR/home/.android}
+ANDROID_SERIAL=${ANDROID_SERIAL:-$ANDROID_APPLIANCE_SERIAL}
+
+AVD_NAME=${AVD_NAME:-${APPLIANCE_AVD_NAME:-android}}
+AVD_API=${AVD_API:-${APPLIANCE_API_LEVEL:-36}}
+AVD_TAG=${AVD_TAG:-google_apis_playstore}
+AVD_SYSTEM_IMAGE=${AVD_SYSTEM_IMAGE:-system-images/android-$AVD_API/$AVD_TAG/x86_64}
+AVD_RAM_MIB=${AVD_RAM_MIB:-${APPLIANCE_MEMORY_MIB:-4096}}
+AVD_CORES=${AVD_CORES:-${APPLIANCE_CORES:-4}}
+AVD_DISK_SIZE=${AVD_DISK_SIZE:-${APPLIANCE_DISK_SIZE:-32G}}
+
+export ANDROID_APPLIANCE_CONFIG
+export ANDROID_APPLIANCE_STATE_DIR ANDROID_APPLIANCE_USER ANDROID_APPLIANCE_UNIT
+export ANDROID_APPLIANCE_SERIAL ANDROID_ADB_SERVER_PORT
+export ANDROID_APPLIANCE_ADB ANDROID_APPLIANCE_IDLE_STOP
+export ANDROID_APPLIANCE_DISPLAY_URL ANDROID_APPLIANCE_X_DISPLAY
+export ANDROID_HOME ANDROID_SDK_ROOT ANDROID_AVD_HOME ANDROID_USER_HOME ANDROID_SERIAL
+export AVD_NAME AVD_API AVD_TAG AVD_SYSTEM_IMAGE AVD_RAM_MIB AVD_CORES AVD_DISK_SIZE

@@ -1,0 +1,41 @@
+# Configuration of the Android appliance.
+#
+# install.sh copies this file to /etc/android-appliance/appliance.conf.
+# Syntax: KEY=value, one key per line, no spaces and no quotes. A value
+# that is already in the environment keeps the environment value. Edit
+# the file, then run install.sh again to apply a change.
+
+# Persistent appliance directory. It holds the AVD, userdata and adb keys.
+APPLIANCE_STATE_DIR=/var/lib/android-appliance
+
+# User and group that run the emulator and operate it.
+APPLIANCE_USER=android-appliance
+APPLIANCE_GROUP=android-appliance
+
+# Name of the AVD in the state directory.
+APPLIANCE_AVD_NAME=android
+
+# Android API level of the system image. The Google APIs Play Store
+# image must exist for this level and x86_64.
+APPLIANCE_API_LEVEL=36
+
+# Stop Android after this many minutes without use. The next use cold
+# boots with the existing userdata.
+APPLIANCE_IDLE_STOP_MINUTES=60
+
+# Guest hardware. A change preserves userdata but forces a cold boot.
+APPLIANCE_MEMORY_MIB=4096
+APPLIANCE_CORES=4
+APPLIANCE_DISK_SIZE=32G
+
+# Emulator -gpu mode. swiftshader works on every headless host; host
+# needs a usable GPU and EGL. Snapshot load/save is always disabled.
+APPLIANCE_GPU=swiftshader
+
+# Browser display through scrcpy and noVNC. 1 serves the device screen
+# at the loopback port below; 0 disables it.
+APPLIANCE_DISPLAY_ENABLED=1
+APPLIANCE_DISPLAY_PORT=6090
+
+# Android SDK directory. scripts/provision-sdk.sh installs the SDK here.
+APPLIANCE_ANDROID_HOME=/opt/android-sdk

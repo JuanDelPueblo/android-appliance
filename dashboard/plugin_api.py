@@ -24,7 +24,7 @@ router = APIRouter()
 
 PLUGIN_ID = "android-appliance"
 API = f"/api/plugins/{PLUGIN_ID}"
-FALLBACK_PATH = "/run/current-system/sw/bin/androidctl"
+FALLBACK_PATH = "/usr/local/bin/androidctl"
 TICKET_TTL = 60
 _tickets: Dict[str, tuple[float, str]] = {}
 

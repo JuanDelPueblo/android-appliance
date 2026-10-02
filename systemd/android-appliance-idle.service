@@ -1,0 +1,12 @@
+[Unit]
+Description=Stop the idle Android appliance
+
+[Service]
+Type=oneshot
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ExecStart=/usr/local/bin/androidctl idle-check
+
+# User, Group and ReadWritePaths are set by the 50-appliance.conf
+# drop-in that install.sh writes.

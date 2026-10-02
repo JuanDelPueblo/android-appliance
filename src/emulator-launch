@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# emulator-launch: start the emulator with the appliance flags. This is
+# the ExecStart of android-appliance-emulator.service. Every start is a
+# cold boot; guest RAM stays anonymous and snapshots stay disabled.
+set -euo pipefail
+
+self=$(readlink -f "${BASH_SOURCE[0]}")
+# shellcheck source=src/appliance-env
+source "$(dirname "$self")/appliance-env"
+
+: "${ANDROID_HOME:?ANDROID_HOME is not set; run scripts/provision-sdk.sh and set APPLIANCE_ANDROID_HOME in /etc/android-appliance/appliance.conf}"
+
+# The state home keeps emulator state and adb keys inside the appliance.
+export HOME=$ANDROID_APPLIANCE_STATE_DIR/home
+
+gpu=${APPLIANCE_GPU:-swiftshader}
+features=-QuickbootFileBacked
+
+case $gpu in
+  host)
+    # The known-good host GPU setup keeps Vulkan off and needs the
+    # appliance X server; plain -gpu host fails without a display.
+    features=-QuickbootFileBacked,-Vulkan
+    export DISPLAY=${ANDROID_APPLIANCE_X_DISPLAY:-:57}
+    ;;
+esac
+
+exec "$ANDROID_HOME/emulator/emulator" \
+  -avd "$AVD_NAME" \
+  -port 5554 \
+  -no-window \
+  -no-audio \
+  -no-boot-anim \
+  -no-metrics \
+  -gpu "$gpu" \
+  -feature "$features" \
+  -no-snapshot

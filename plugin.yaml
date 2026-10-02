@@ -22,7 +22,7 @@ config_schema:
   androidctl:
     type: str
     default: ""
-    description: "Path to androidctl. Empty means PATH, then /run/current-system/sw/bin/androidctl."
+    description: "Path to androidctl. Empty means PATH, then /usr/local/bin/androidctl."
   display_url:
     type: str
     default: ""

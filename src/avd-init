@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 # avd-init: create the persistent AVD on first start and keep the managed
-# hardware keys in line with the NixOS options.
+# hardware keys in line with the appliance configuration.
 #
 # The AVD format is two small ini files. Writing them directly avoids a JDK
 # and avdmanager at runtime. The emulator creates userdata on first boot.
 set -euo pipefail
+
+# Read the appliance configuration into the environment.
+self=$(readlink -f "${BASH_SOURCE[0]}")
+# shellcheck source=src/appliance-env
+source "$(dirname "$self")/appliance-env"
+
+# The state home keeps adb keys inside the appliance state directory.
+export HOME=$ANDROID_APPLIANCE_STATE_DIR/home
 
 : "${ANDROID_AVD_HOME:?}" "${AVD_NAME:?}" "${AVD_SYSTEM_IMAGE:?}" "${AVD_API:?}"
 : "${AVD_TAG:?}" "${AVD_RAM_MIB:?}" "${AVD_CORES:?}" "${AVD_DISK_SIZE:?}"
@@ -46,9 +54,9 @@ if [ -f "$registry" ]; then
   reg_path=$(sed -n 's/^path=//p' "$registry" | head -n 1)
   if [ -n "$reg_path" ] && [ "$(canon "$reg_path")" != "$(canon "$avd_dir")" ]; then
     echo "avd-init: registry '$registry' points to '$reg_path'," >&2
-    echo "avd-init: but services.android-appliance.stateDir expects '$avd_dir'." >&2
+    echo "avd-init: but APPLIANCE_STATE_DIR in $config_file expects '$avd_dir'." >&2
     echo "avd-init: refusing to inspect one AVD while the emulator would launch another." >&2
-    echo "avd-init: point stateDir at the live tree (for this path: the parent of '$(dirname "$reg_path")')," >&2
+    echo "avd-init: point APPLIANCE_STATE_DIR at the live tree (for this path: the parent of '$(dirname "$reg_path")')," >&2
     echo "avd-init: or remove the stale registry entry; not touching the AVD." >&2
     exit 1
   fi
@@ -98,8 +106,8 @@ else
       ;;
     *)
       echo "avd-init: existing AVD '$AVD_NAME' uses '${current_image%/}', but" >&2
-      echo "avd-init: services.android-appliance.apiLevel is $AVD_API ($AVD_SYSTEM_IMAGE/)." >&2
-      echo "avd-init: apiLevel does not upgrade existing AVDs; use the matching level or recreate the AVD." >&2
+      echo "avd-init: APPLIANCE_API_LEVEL in $config_file is $AVD_API ($AVD_SYSTEM_IMAGE/)." >&2
+      echo "avd-init: APPLIANCE_API_LEVEL does not upgrade existing AVDs; use the matching level or recreate the AVD." >&2
       exit 1
       ;;
   esac

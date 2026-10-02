@@ -64,7 +64,8 @@ in
 
   shellcheck = pkgs.runCommand "shellcheck" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
     cd ${src}
-    shellcheck src/androidctl src/avd-init tests/*.sh tests/fakes/*
+    shellcheck -x src/androidctl src/avd-init src/appliance-env src/emulator-launch src/display-scrcpy \
+      install.sh scripts/provision-sdk.sh tests/*.sh tests/fakes/* run-tests.sh
     touch $out
   '';
 

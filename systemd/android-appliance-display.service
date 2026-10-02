@@ -1,0 +1,19 @@
+[Unit]
+Description=noVNC for the Android appliance
+Requires=android-appliance-xvnc.service
+After=android-appliance-xvnc.service
+Wants=android-appliance-scrcpy.service
+PartOf=android-appliance-emulator.service
+
+[Service]
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+# Queue the start of a stopped emulator.
+ExecStartPre=/usr/local/bin/androidctl start --no-wait
+ExecStart=/usr/bin/websockify --inetd --web=/usr/share/novnc --unix-target=/run/android-appliance/vnc.sock
+StandardInput=socket
+StandardOutput=journal
+
+# User, Group and ReadWritePaths are set by the 50-appliance.conf
+# drop-in that install.sh writes.

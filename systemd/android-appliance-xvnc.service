@@ -1,0 +1,14 @@
+[Unit]
+Description=Virtual display for the Android appliance
+PartOf=android-appliance-emulator.service
+
+[Service]
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ExecStart=/usr/bin/Xvnc :57 -geometry 1080x1920 -depth 24 -desktop Android -SecurityTypes None -AlwaysShared -rfbport -1 -rfbunixpath /run/android-appliance/vnc.sock -rfbunixmode 0600 -nolisten tcp
+ExecStartPost=/bin/sh -c 'until /usr/bin/xdpyinfo -display :57 >/dev/null 2>&1 && [ -S /run/android-appliance/vnc.sock ]; do /usr/bin/sleep 0.2; done'
+TimeoutStartSec=30s
+
+# User, Group and ReadWritePaths are set by the 50-appliance.conf
+# drop-in that install.sh writes.

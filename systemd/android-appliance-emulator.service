@@ -1,0 +1,22 @@
+[Unit]
+Description=Android Emulator appliance
+Wants=android-appliance-idle.timer
+After=network.target
+
+[Service]
+Type=simple
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+SupplementaryGroups=kvm
+PrivateTmp=true
+ExecStartPre=/usr/local/libexec/android-appliance/avd-init
+ExecStart=/usr/local/libexec/android-appliance/emulator-launch
+ExecStartPost=/usr/local/bin/androidctl boot-hook
+ExecStop=/usr/local/bin/androidctl stop-hook
+TimeoutStartSec=20min
+TimeoutStopSec=3min
+Restart=no
+
+# User, Group, ReadWritePaths, WorkingDirectory and RequiresMountsFor
+# are set by the 50-appliance.conf drop-in that install.sh writes.

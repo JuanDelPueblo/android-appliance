@@ -1,0 +1,9 @@
+[Unit]
+Description=Browser display for the Android appliance
+
+[Socket]
+# ListenStream is set by the 50-appliance.conf drop-in that install.sh
+# writes, from APPLIANCE_DISPLAY_PORT.
+
+[Install]
+WantedBy=sockets.target

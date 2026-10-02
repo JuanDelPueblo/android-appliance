@@ -34,6 +34,8 @@ stdenvNoCC.mkDerivation {
     runHook preInstall
     install -Dm755 androidctl $out/libexec/androidctl
     install -Dm755 avd-init $out/libexec/avd-init
+    install -Dm644 appliance-env $out/libexec/appliance-env
+    install -Dm755 display-idle $out/libexec/display-idle
     makeWrapper $out/libexec/androidctl $out/bin/androidctl \
       --prefix PATH : ${runtimePath} ${setEnv}
     makeWrapper $out/libexec/avd-init $out/bin/android-avd-init \
