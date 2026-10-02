@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install.sh: install the Android appliance on a systemd host.
 #
-# Run as root: sudo ./install.sh
+# Run as root: ./install.sh
 # Staging mode for tests: ./install.sh --root DIR
 #
 # The configuration lives in /etc/android-appliance/appliance.conf. The
@@ -171,6 +171,7 @@ fi
 
 # Check the operating-system packages of the enabled parts.
 missing=()
+missing_scrcpy=0
 need_binary() {
   command -v "$1" >/dev/null 2>&1 || missing+=("$2")
 }
@@ -182,7 +183,8 @@ if [ "$display_enabled" = 1 ] || [ "$gpu" = host ]; then
   need_binary xdpyinfo xdpyinfo
 fi
 if [ "$display_enabled" = 1 ]; then
-  need_binary scrcpy scrcpy
+  # Fedora 44 ships no scrcpy; the zeno/scrcpy COPR provides it.
+  command -v scrcpy >/dev/null 2>&1 || missing_scrcpy=1
   need_binary websockify python3-websockify
   need_file /usr/share/novnc/vnc.html novnc
   need_binary python3 python3
@@ -191,9 +193,25 @@ fi
 if [ "${#missing[@]}" -gt 0 ]; then
   die "missing packages: ${missing[*]}; run: dnf install ${missing[*]}"
 fi
+if [ "$missing_scrcpy" = 1 ]; then
+  die "scrcpy is missing; run: dnf install dnf-plugins-core && dnf copr enable zeno/scrcpy && dnf install scrcpy"
+fi
 
 [ -c /dev/kvm ] || echo "install.sh: WARNING /dev/kvm is missing; the emulator needs KVM" >&2
-if [ ! -x "$android_home/emulator/emulator" ]; then
+if [ -x "$android_home/emulator/emulator" ]; then
+  # The emulator needs host libraries that a minimal server can lack.
+  missing_libs=
+  for bin in "$android_home/emulator/emulator" "$android_home"/emulator/qemu/*/qemu-system-*; do
+    if [ -x "$bin" ]; then
+      missing_libs=$missing_libs$(ldd "$bin" 2>&1 | grep 'not found' || true)
+    fi
+  done
+  if [ -n "$missing_libs" ]; then
+    echo "install.sh: the emulator misses these host libraries:" >&2
+    printf '%s\n' "$missing_libs" | sed 's/^/  /' >&2
+    die "install them and re-run install.sh; dnf provides names their packages"
+  fi
+else
   echo "install.sh: WARNING the SDK is not installed at $android_home; run scripts/provision-sdk.sh" >&2
 fi
 

@@ -164,35 +164,38 @@ avd-init: refusing to inspect one AVD while the emulator would launch another.
 
 The appliance also installs without Nix, with its own installer.
 
-1. Install the operating-system packages:
+1. Install the operating-system packages. Fedora 44 ships no scrcpy;
+   the zeno/scrcpy COPR provides it:
 
    ```bash
-   dnf install tigervnc-x11-server xdpyinfo scrcpy python3-websockify novnc \
-     libXScrnSaver polkit
+   dnf install tigervnc-x11-server xdpyinfo python3-websockify novnc \
+     libXScrnSaver polkit dnf-plugins-core
+   dnf copr enable zeno/scrcpy
+   dnf install scrcpy
    ```
 
-2. Install the Android SDK. The emulator and the system image are not in
-   the Fedora repositories:
+2. Install the Android SDK, as root. The emulator and the system image
+   are not in the Fedora repositories:
 
    ```bash
-   sudo ./scripts/provision-sdk.sh
+   ./scripts/provision-sdk.sh
    ```
 
-3. Copy and edit the configuration. The keys match the options above:
+3. Copy the configuration, as root. The keys match the options above:
    `APPLIANCE_STATE_DIR` is `stateDir`, `APPLIANCE_API_LEVEL` is
    `apiLevel`, `APPLIANCE_IDLE_STOP_MINUTES` is `idleStopMinutes`, and
-   so on.
+   so on. Then edit `/etc/android-appliance/appliance.conf`.
 
    ```bash
-   sudo install -Dm644 conf/appliance.conf.example /etc/android-appliance/appliance.conf
-   sudoedit /etc/android-appliance/appliance.conf
+   install -Dm644 conf/appliance.conf.example /etc/android-appliance/appliance.conf
    ```
 
-4. Install and start. The installer also creates the configuration file
-   from the example when it is missing, then applies it.
+4. Install and start, as root. The installer also creates the
+   configuration file from the example when it is missing, then applies
+   it.
 
    ```bash
-   sudo ./install.sh
+   ./install.sh
    androidctl start
    ```
 

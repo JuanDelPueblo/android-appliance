@@ -12,12 +12,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install the test dependencies
-        run: >
-          dnf install -y --setopt=install_weak_deps=False
-          bash coreutils grep sed gawk util-linux
-          shellcheck systemd polkit
-          python3 python3-aiohttp python3-fastapi python3-httpx python3-pyyaml nodejs
-          tigervnc-x11-server xdpyinfo scrcpy python3-websockify novnc libXScrnSaver
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            bash coreutils grep sed gawk util-linux \
+            shellcheck systemd polkit dnf-plugins-core \
+            python3 python3-aiohttp python3-fastapi python3-httpx python3-pyyaml nodejs \
+            tigervnc-x11-server xdpyinfo python3-websockify novnc libXScrnSaver
+          # Fedora 44 ships no scrcpy; the zeno/scrcpy COPR provides it.
+          dnf copr enable -y zeno/scrcpy
+          dnf install -y scrcpy
       - name: Install the appliance
         run: ./install.sh
       - name: Run the tests
@@ -27,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Keep in step with the Hermes release that runs the plugin.
-      HERMES_REF: v2026.9.14
+      HERMES_REF: v2026.9.24
     steps:
       - uses: actions/checkout@v4
         with:
