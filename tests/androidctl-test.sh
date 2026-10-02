@@ -304,6 +304,14 @@ t_start_waits_for_queued_dependency() {
   state_is running
 }
 
+t_unwritable_lock_explains_service_sandbox() {
+  mkdir "$FAKE/state/activity.lock"
+  not ctl start --no-wait
+  grep -q 'ReadWritePaths' "$FAKE/out"
+  grep -q 'does not prove the host filesystem is read-only' "$FAKE/out"
+  not grep -q '^systemctl start' "$FAKE/calls"
+}
+
 for t in $(declare -F | awk '{print $3}' | grep '^t_'); do
   check "${t#t_}" "$t"
 done

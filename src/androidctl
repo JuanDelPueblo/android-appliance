@@ -65,6 +65,12 @@ die() {
   exit 1
 }
 
+open_activity_lock() {
+  if ! { exec 9>"$state_dir/activity.lock"; }; then
+    die "cannot write $state_dir/activity.lock; allow $state_dir in the calling service's ReadWritePaths when using ProtectSystem=strict. A service-local read-only mount does not prove the host filesystem is read-only."
+  fi
+}
+
 adb() { timeout "${ANDROID_APPLIANCE_COMMAND_TIMEOUT:-300}" "$adb_bin" -s "$serial" "$@"; }
 
 # Bound probes so an unresponsive guest cannot hang status or shutdown.
@@ -296,11 +302,11 @@ shift
 
 case "$cmd" in
   idle-check)
-    exec 9>"$state_dir/activity.lock"
+    open_activity_lock
     flock -n 9 || exit 0
     ;;
   start | restart | screenshot | ui | tap | swipe | text | key | shell | install | push | pull)
-    exec 9>"$state_dir/activity.lock"
+    open_activity_lock
     flock -s 9
     trap 'finish_command "$?"' EXIT
     ;;

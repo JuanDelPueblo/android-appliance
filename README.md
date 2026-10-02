@@ -369,6 +369,7 @@ journalctl -u android-appliance-scrcpy -u android-appliance-display -b
 | `device offline` for 120s | The guest is stuck. `start` reports it; look at the emulator log and restart. A brief offline during early boot is normal. |
 | `refusing to inspect one AVD` | `stateDir/avd/<name>.ini` points outside `stateDir`. Point `stateDir` at the live tree; the AVD is untouched. |
 | `Interactive authentication required` | The command ran as a user other than `user`. Run it as `user` or as root. |
+| `activity.lock: Read-only file system` inside Hermes | With `ProtectSystem=strict`, grant the appliance `stateDir` in `ReadWritePaths` for both `hermes-agent` and `hermes-backend`. Also preserve normal user ownership of the directory. A service-local read-only mount does not establish that the host root filesystem is read-only. |
 | Black browser display | Android is starting, or scrcpy restarts. Look at the scrcpy log. |
 | `-gpu host` fails with EGL/display errors | Host mode needs the appliance X server (`:57`), `render`/`video` groups, and `-feature -Vulkan`. The module sets this; do not override with plain `-gpu host` and no display. Software `swiftshader` needs no display. |
 
