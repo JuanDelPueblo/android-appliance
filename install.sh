@@ -6,8 +6,9 @@
 #
 # The configuration lives in /etc/android-appliance/appliance.conf. The
 # installer creates it from conf/appliance.conf.example when it is
-# missing, then applies it. Edit the file and run the installer again to
-# apply a change; it is idempotent.
+# missing, then applies it. It also installs the pinned Android SDK
+# with scripts/provision-sdk.sh. Edit the file and run the installer
+# again to apply a change; it is idempotent.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -53,6 +54,12 @@ group=${APPLIANCE_GROUP:-android-appliance}
 gpu=${APPLIANCE_GPU:-swiftshader}
 display_port=${APPLIANCE_DISPLAY_PORT:-6090}
 android_home=${APPLIANCE_ANDROID_HOME:-/opt/android-sdk}
+
+case ${APPLIANCE_SDK_MANAGED:-1} in
+  1 | true | yes) sdk_managed=1 ;;
+  0 | false | no) sdk_managed=0 ;;
+  *) die "APPLIANCE_SDK_MANAGED must be 1 or 0" ;;
+esac
 
 case ${APPLIANCE_DISPLAY_ENABLED:-1} in
   1 | true | yes) display_enabled=1 ;;
@@ -163,7 +170,7 @@ polkit.addRule(function (action, subject) {
 EOF
 
 if [ -n "$root" ]; then
-  echo "install.sh: staged the appliance under $root"
+  echo "install.sh: staged the appliance under $root; the SDK is not provisioned"
   exit 0
 fi
 
@@ -195,6 +202,10 @@ if [ "$display_enabled" = 1 ]; then
   need_binary python3 python3
   ldconfig -p 2>/dev/null | grep -q libXss.so || missing+=(libXScrnSaver)
 fi
+if [ "$sdk_managed" = 1 ]; then
+  need_binary curl curl
+  need_binary unzip unzip
+fi
 if [ "${#missing[@]}" -gt 0 ]; then
   die "missing packages: ${missing[*]}; run: dnf install ${missing[*]}"
 fi
@@ -203,11 +214,23 @@ if [ "$missing_scrcpy" = 1 ]; then
 fi
 
 [ -c /dev/kvm ] || echo "install.sh: WARNING /dev/kvm is missing; the emulator needs KVM" >&2
-if [ -x "$android_home/emulator/emulator" ]; then
-  # The emulator needs host libraries that a minimal server can lack.
+
+# The Android SDK. provision-sdk.sh installs the pinned packages; it
+# downloads nothing when they are in place. Both modes check the SDK,
+# including the host libraries of the emulator.
+if [ "$sdk_managed" = 1 ]; then
+  "$here/scripts/provision-sdk.sh" || die "the SDK installation failed; correct the problem and re-run install.sh"
+elif [ -x "$android_home/emulator/emulator" ]; then
   "$here/scripts/provision-sdk.sh" --check || die "the SDK check failed; correct the problem and re-run install.sh"
 else
-  echo "install.sh: WARNING the SDK is not installed at $android_home; run scripts/provision-sdk.sh" >&2
+  echo "install.sh: WARNING the SDK is not installed at $android_home, and APPLIANCE_SDK_MANAGED=0" >&2
+fi
+
+# Give the installed files their SELinux labels.
+if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled && command -v restorecon >/dev/null 2>&1; then
+  restorecon -R "$libexec" "$bindir/androidctl" "$bindir/android-avd-init" \
+    "$unit_dir"/android-appliance-* /etc/tmpfiles.d/android-appliance.conf \
+    /etc/polkit-1/rules.d/49-android-appliance.rules /etc/android-appliance
 fi
 
 # Apply the unit set and the state directories.
@@ -215,9 +238,9 @@ systemd-tmpfiles --create "$root/etc/tmpfiles.d/android-appliance.conf"
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload
   if [ "$display_enabled" = 1 ]; then
-    systemctl enable android-appliance-display.socket
+    systemctl enable --now android-appliance-display.socket
   else
-    systemctl disable android-appliance-display.socket 2>/dev/null || true
+    systemctl disable --now android-appliance-display.socket 2>/dev/null || true
   fi
 else
   echo "install.sh: systemd is not running; skipped daemon-reload and unit enablement" >&2

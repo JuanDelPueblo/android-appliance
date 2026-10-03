@@ -165,60 +165,20 @@ avd-init: refusing to inspect one AVD while the emulator would launch another.
 ## Install on Fedora Server (or another systemd distribution)
 
 The appliance also installs without Nix, with its own installer.
+`install.sh` is the single entry point: it installs the pinned Android
+SDK, the scripts, the units and the rules.
 
-1. Install the operating-system packages. Fedora 44 ships no scrcpy;
-   the zeno/scrcpy COPR provides it:
+1. Install the operating-system packages, as root. Fedora 44 ships no
+   scrcpy; the zeno/scrcpy COPR provides it:
 
    ```bash
    dnf install tigervnc-x11-server xdpyinfo python3-websockify novnc \
-     libXScrnSaver polkit dnf-plugins-core
+     libXScrnSaver polkit dnf-plugins-core curl unzip
    dnf copr enable zeno/scrcpy
    dnf install scrcpy
    ```
 
-2. Install the Android SDK, as root. The emulator and the system image
-   are not in the Fedora repositories:
-
-   ```bash
-   ./scripts/provision-sdk.sh
-   ```
-
-   The script downloads the emulator, platform-tools and the system
-   image of `APPLIANCE_API_LEVEL` from Google. `conf/sdk.lock` pins the
-   archive and the SHA-256 of each package revision, so two installs
-   give the same SDK. A package that has the pinned revision stays as it
-   is, so a second run downloads nothing. A package with a different
-   revision, for example from `sdkmanager`, is replaced. A wrong SHA-256
-   stops the script before it changes the SDK. The archives are under
-   the [Android SDK License](https://developer.android.com/studio/terms).
-
-   The script needs `curl` and `unzip`; it does not need Java. The
-   `APPLIANCE_SDK_*` keys in `appliance.conf` select other revisions
-   from the lock. To use a revision that is not in `conf/sdk.lock`, add
-   a line to `/etc/android-appliance/sdk.lock`. The script reads that
-   file first.
-
-   | Package | Default revision |
-   |---|---|
-   | `emulator` | 37.2.12 |
-   | `platform-tools` | 37.0.1 |
-   | `system-images;android-36;google_apis_playstore;x86_64` | 7 |
-   | `system-images;android-35;google_apis_playstore;x86_64` | 9 |
-   | `cmdline-tools` (only when `APPLIANCE_SDK_CMDLINE_TOOLS_VERSION` is set) | 23.0 |
-
-   `./scripts/provision-sdk.sh --check` checks an installed SDK and
-   changes nothing. It finds the emulator, adb and the system image,
-   and runs `ldd` on the emulator and the x86_64 qemu binaries. `ldd`
-   gets the bundled library path of the emulator (`emulator/lib64` and
-   `emulator/lib64/qt/lib`), as the `emulator` launcher does at run
-   time. Thus the check reports only missing host libraries. The check
-   also makes sure that other users can read and run the SDK files,
-   because the emulator runs as `APPLIANCE_USER`. `sdkmanager` installs
-   the programs with mode `0744`, so `provision-sdk.sh` runs
-   `chmod -R a+rX` on the SDK after the install. The check also warns
-   when an installed revision is not the pin.
-
-3. Copy the configuration, as root. The keys match the options above:
+2. Copy the configuration, as root. The keys match the options above:
    `APPLIANCE_STATE_DIR` is `stateDir`, `APPLIANCE_API_LEVEL` is
    `apiLevel`, `APPLIANCE_IDLE_STOP_MINUTES` is `idleStopMinutes`, and
    so on. Then edit `/etc/android-appliance/appliance.conf`.
@@ -227,9 +187,9 @@ The appliance also installs without Nix, with its own installer.
    install -Dm644 conf/appliance.conf.example /etc/android-appliance/appliance.conf
    ```
 
-4. Install and start, as root. The installer also creates the
+3. Install and start, as root. The installer also creates the
    configuration file from the example when it is missing, then applies
-   it.
+   it. The first run downloads about 2.5 GB for the SDK.
 
    ```bash
    ./install.sh
@@ -239,10 +199,57 @@ The appliance also installs without Nix, with its own installer.
 `install.sh` is idempotent: run it again after a configuration change.
 It installs the scripts under `/usr/local`, the unit files under
 `/etc/systemd/system` with a deployment drop-in, the tmpfiles rule and
-the polkit rule. `tests/smoke.sh` runs an end-to-end check on the
-installed host. The idle display input uses `display-idle`, a small
-Python helper that needs `libXScrnSaver`, because Fedora does not
-package `xprintidle`.
+the polkit rule. It enables and starts the display socket when the
+display is on. It does not enable the emulator or the idle timer, so
+Android stays off after a host boot. On an SELinux host, it gives the
+installed files their default labels with `restorecon`.
+`tests/smoke.sh` runs an end-to-end check on the installed host. The
+idle display input uses `display-idle`, a small Python helper that needs
+`libXScrnSaver`, because Fedora does not package `xprintidle`.
+
+### The Android SDK
+
+`install.sh` runs `scripts/provision-sdk.sh`, which installs the SDK in
+`APPLIANCE_ANDROID_HOME` (default `/opt/android-sdk`). You can also run
+the script alone, as root. The emulator and the system image are not in
+the Fedora repositories.
+
+The script downloads the emulator, platform-tools and the system image
+of `APPLIANCE_API_LEVEL` from Google. `conf/sdk.lock` pins the archive
+and the SHA-256 of each package revision, so two installs give the same
+SDK. A package that has the pinned revision stays as it is, so a second
+run downloads nothing. A package with a different revision, for example
+from `sdkmanager`, is replaced. A wrong SHA-256 stops the script before
+it changes the SDK. The archives are under the
+[Android SDK License](https://developer.android.com/studio/terms).
+
+The script needs `curl` and `unzip`; it does not need Java. The
+`APPLIANCE_SDK_*` keys in `appliance.conf` select other revisions from
+the lock. To use a revision that is not in `conf/sdk.lock`, add a line
+to `/etc/android-appliance/sdk.lock`. The script reads that file first.
+
+| Package | Default revision |
+|---|---|
+| `emulator` | 37.2.12 |
+| `platform-tools` | 37.0.1 |
+| `system-images;android-36;google_apis_playstore;x86_64` | 7 |
+| `system-images;android-35;google_apis_playstore;x86_64` | 9 |
+| `cmdline-tools` (only when `APPLIANCE_SDK_CMDLINE_TOOLS_VERSION` is set) | 23.0 |
+
+To manage the SDK yourself, set `APPLIANCE_SDK_MANAGED=0`. Then
+`install.sh` does not change the SDK. It only runs the check below.
+
+`./scripts/provision-sdk.sh --check` checks an installed SDK and changes
+nothing. It finds the emulator, adb and the system image, and runs
+`ldd` on the emulator and the x86_64 qemu binaries. `ldd` gets the
+bundled library path of the emulator (`emulator/lib64` and
+`emulator/lib64/qt/lib`), as the `emulator` launcher does at run time.
+Thus the check reports only missing host libraries. The check also makes
+sure that other users can read and run the SDK files, because the
+emulator runs as `APPLIANCE_USER`. `sdkmanager` installs the programs
+with mode `0744`, so `provision-sdk.sh` runs `chmod -R a+rX` on the SDK
+after the install. The check also warns when an installed revision is
+not the pin.
 
 ## Adopting an AVD from another appliance
 

@@ -122,4 +122,19 @@ grep_file '^ListenStream=127\.0\.0\.1:6090$' \
 echo "ok   default staging"
 rm -rf "$root2"
 
+# A wrong SDK mode stops the installer before it changes a file.
+root3=$(mktemp -d)
+mkdir -p "$root3/etc/android-appliance"
+echo "APPLIANCE_SDK_MANAGED=maybe" >"$root3/etc/android-appliance/appliance.conf"
+if bash "$here/../install.sh" --root "$root3" >/dev/null 2>&1; then
+  echo "FAIL APPLIANCE_SDK_MANAGED=maybe must stop the installer" >&2
+  exit 1
+fi
+[ ! -e "$root3/usr/local/libexec" ] || {
+  echo "FAIL the installer changed files after a configuration error" >&2
+  exit 1
+}
+rm -rf "$root3"
+echo "ok   wrong SDK mode stops"
+
 echo "install tests passed"

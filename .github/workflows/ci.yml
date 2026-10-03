@@ -15,14 +15,15 @@ jobs:
         run: |
           dnf install -y --setopt=install_weak_deps=False \
             bash coreutils grep sed gawk util-linux \
-            shellcheck systemd polkit dnf-plugins-core \
+            shellcheck systemd polkit dnf-plugins-core curl unzip \
             python3 python3-aiohttp python3-fastapi python3-httpx python3-pyyaml nodejs \
             tigervnc-x11-server xdpyinfo python3-websockify novnc libXScrnSaver
           # Fedora 44 ships no scrcpy; the zeno/scrcpy COPR provides it.
           dnf copr enable -y zeno/scrcpy
           dnf install -y scrcpy
+      # The CI job does not download the Android SDK (about 2.5 GB).
       - name: Install the appliance
-        run: ./install.sh
+        run: APPLIANCE_SDK_MANAGED=0 ./install.sh
       - name: Run the tests
         run: ./run-tests.sh
 

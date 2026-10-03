@@ -37,8 +37,13 @@ APPLIANCE_GPU=swiftshader
 APPLIANCE_DISPLAY_ENABLED=1
 APPLIANCE_DISPLAY_PORT=6090
 
-# Android SDK directory. scripts/provision-sdk.sh installs the SDK here.
+# Android SDK directory. install.sh installs the pinned SDK here with
+# scripts/provision-sdk.sh.
 APPLIANCE_ANDROID_HOME=/opt/android-sdk
+
+# 1: install.sh installs the pinned SDK packages. 0: you manage the SDK,
+# and install.sh only checks it.
+APPLIANCE_SDK_MANAGED=1
 
 # Revisions of the SDK packages. conf/sdk.lock pins the archive and the
 # SHA-256 of each revision. An unset key selects the default revision
