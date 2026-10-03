@@ -183,6 +183,29 @@ The appliance also installs without Nix, with its own installer.
    ./scripts/provision-sdk.sh
    ```
 
+   The script downloads the emulator, platform-tools and the system
+   image of `APPLIANCE_API_LEVEL` from Google. `conf/sdk.lock` pins the
+   archive and the SHA-256 of each package revision, so two installs
+   give the same SDK. A package that has the pinned revision stays as it
+   is, so a second run downloads nothing. A package with a different
+   revision, for example from `sdkmanager`, is replaced. A wrong SHA-256
+   stops the script before it changes the SDK. The archives are under
+   the [Android SDK License](https://developer.android.com/studio/terms).
+
+   The script needs `curl` and `unzip`; it does not need Java. The
+   `APPLIANCE_SDK_*` keys in `appliance.conf` select other revisions
+   from the lock. To use a revision that is not in `conf/sdk.lock`, add
+   a line to `/etc/android-appliance/sdk.lock`. The script reads that
+   file first.
+
+   | Package | Default revision |
+   |---|---|
+   | `emulator` | 37.2.12 |
+   | `platform-tools` | 37.0.1 |
+   | `system-images;android-36;google_apis_playstore;x86_64` | 7 |
+   | `system-images;android-35;google_apis_playstore;x86_64` | 9 |
+   | `cmdline-tools` (only when `APPLIANCE_SDK_CMDLINE_TOOLS_VERSION` is set) | 23.0 |
+
    `./scripts/provision-sdk.sh --check` checks an installed SDK and
    changes nothing. It finds the emulator, adb and the system image,
    and runs `ldd` on the emulator and the x86_64 qemu binaries. `ldd`
@@ -192,7 +215,8 @@ The appliance also installs without Nix, with its own installer.
    also makes sure that other users can read and run the SDK files,
    because the emulator runs as `APPLIANCE_USER`. `sdkmanager` installs
    the programs with mode `0744`, so `provision-sdk.sh` runs
-   `chmod -R a+rX` on the SDK after the install.
+   `chmod -R a+rX` on the SDK after the install. The check also warns
+   when an installed revision is not the pin.
 
 3. Copy the configuration, as root. The keys match the options above:
    `APPLIANCE_STATE_DIR` is `stateDir`, `APPLIANCE_API_LEVEL` is

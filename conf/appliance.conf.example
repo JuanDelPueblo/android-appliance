@@ -39,3 +39,17 @@ APPLIANCE_DISPLAY_PORT=6090
 
 # Android SDK directory. scripts/provision-sdk.sh installs the SDK here.
 APPLIANCE_ANDROID_HOME=/opt/android-sdk
+
+# Revisions of the SDK packages. conf/sdk.lock pins the archive and the
+# SHA-256 of each revision. An unset key selects the default revision
+# of the lock (for the system image: the default for
+# APPLIANCE_API_LEVEL). Set a key to keep a revision when a new project
+# version changes the default. The command-line tools (sdkmanager) are
+# not necessary; set their key to install them. They need Java.
+#APPLIANCE_SDK_EMULATOR_VERSION=37.2.12
+#APPLIANCE_SDK_PLATFORM_TOOLS_VERSION=37.0.1
+#APPLIANCE_SDK_IMAGE_REVISION=7
+#APPLIANCE_SDK_CMDLINE_TOOLS_VERSION=23.0
+
+# Download location of the SDK archives, for example a local mirror.
+#APPLIANCE_SDK_REPOSITORY=https://dl.google.com/android/repository

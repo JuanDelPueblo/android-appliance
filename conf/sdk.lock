@@ -1,0 +1,22 @@
+# Pinned Android SDK archives for scripts/provision-sdk.sh.
+#
+# Columns: package, revision, archive, SHA-256 of the archive.
+# The revision is Pkg.Revision in the source.properties of the package.
+# The archive path is relative to APPLIANCE_SDK_REPOSITORY (default
+# https://dl.google.com/android/repository).
+#
+# The first line of a package gives its default revision. Keep the old
+# lines when you add a new revision, because an appliance.conf can pin
+# an old revision. To find a new archive, read repository2-3.xml (or
+# sys-img/google_apis_playstore/sys-img2-3.xml) in the repository. Google
+# publishes a SHA-1 there; download the archive, compare the SHA-1, and
+# record the SHA-256 here.
+#
+# A host can add lines in /etc/android-appliance/sdk.lock. That file is
+# read first.
+
+emulator 37.2.12 emulator-linux_x64-16428233.zip b08fc43d8608d2955f607f1b287beb525041e730086bdca3af152accac3af9c1
+platform-tools 37.0.1 platform-tools_r37.0.1-linux.zip d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1
+system-images;android-36;google_apis_playstore;x86_64 7 sys-img/google_apis_playstore/x86_64-36_r07.zip 279c419c2829627e2bb95104f47e6de02ca9d14774506195d5db93d71bd583c8
+system-images;android-35;google_apis_playstore;x86_64 9 sys-img/google_apis_playstore/x86_64-35_r09.zip 1fb5e5fd1c4b1b54bfe5558f6f361d6c10e13786acff630153e0542df356dfe6
+cmdline-tools 23.0 commandlinetools-linux-16111833_latest.zip 0877a1d048fe4a24efe2eff536ca4223f7adeb58648bb81909d33c446918cfa8
