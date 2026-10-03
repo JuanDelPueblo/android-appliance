@@ -3,7 +3,14 @@ Description=Virtual display for the Android appliance
 PartOf=android-appliance-emulator.service
 
 [Service]
-NoNewPrivileges=true
+# No NoNewPrivileges=true. On an SELinux host such as Fedora, Xvnc has
+# the type xserver_exec_t, and systemd starts it in the X server domain.
+# NoNewPrivileges= blocks that domain change (nnp_transition), and then
+# Xvnc cannot start. Options such as RestrictSUIDSGID= or
+# SystemCallFilter= set NoNewPrivileges= too, so do not add them. The
+# empty capability bounding set prevents a setuid program from giving
+# capabilities to the processes of this unit.
+CapabilityBoundingSet=
 ProtectSystem=strict
 ProtectHome=true
 ExecStart=/usr/bin/Xvnc :57 -geometry 1080x1920 -depth 24 -desktop Android -SecurityTypes None -AlwaysShared -rfbport -1 -rfbunixpath /run/android-appliance/vnc.sock -rfbunixmode 0600 -nolisten tcp

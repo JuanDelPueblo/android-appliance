@@ -394,6 +394,16 @@ the reverse proxy must support WebSocket upgrades.
   so it needs no permission.
 - The noVNC page and the VNC socket are local only. The VNC socket has mode
   `0600`.
+- The Xvnc unit of the standalone install has no `NoNewPrivileges=true`.
+  On an SELinux host such as Fedora, `/usr/bin/Xvnc` has the type
+  `xserver_exec_t`, and systemd starts it in the X server domain
+  (`xserver_t`). `NoNewPrivileges=` blocks that domain change
+  (`nnp_transition`), and Xvnc cannot start. The unit has an empty
+  `CapabilityBoundingSet=` instead, so a setuid program cannot give
+  capabilities to Xvnc. The other units keep `NoNewPrivileges=true`.
+  The trade-off: the X server domain is unconfined in the Fedora
+  policy, so Xvnc gets no extra SELinux confinement. A host change, such
+  as the `bin_t` label for `/usr/bin/Xvnc`, is not necessary.
 
 ## Backup
 
@@ -433,6 +443,7 @@ journalctl -u android-appliance-scrcpy -u android-appliance-display -b
 | `Interactive authentication required` | The command ran as a user other than `user`. Run it as `user` or as root. |
 | `activity.lock: Read-only file system` inside Hermes | With `ProtectSystem=strict`, grant the appliance `stateDir` in `ReadWritePaths` for both `hermes-agent` and `hermes-backend`. Also preserve normal user ownership of the directory. A service-local read-only mount does not establish that the host root filesystem is read-only. |
 | Black browser display | Android is starting, or scrcpy restarts. Look at the scrcpy log. |
+| Xvnc does not start, and the audit log shows `nnp_transition` | A local drop-in or an old unit adds `NoNewPrivileges=true` (or an option that implies it) to `android-appliance-xvnc.service`. Remove it; see Permissions. |
 | `-gpu host` fails with EGL/display errors | Host mode needs the appliance X server (`:57`), `render`/`video` groups, and `-feature -Vulkan`. The module sets this; do not override with plain `-gpu host` and no display. Software `swiftshader` needs no display. |
 
 To run adb directly for debugging, run it as `user` with the environment

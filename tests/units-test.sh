@@ -83,6 +83,11 @@ check "xvnc no auth" '-SecurityTypes None' "$xvnc"
 check "xvnc no tcp" '-nolisten tcp' "$xvnc"
 check "xvnc waits" 'xdpyinfo' "$xvnc"
 check "xvnc part of emulator" '^PartOf=android-appliance-emulator\.service$' "$xvnc"
+# SELinux blocks the change to the X server domain under
+# NoNewPrivileges=, so the unit must not set it, directly or through an
+# option that implies it. The empty bounding set replaces it.
+check_absent "xvnc no NoNewPrivileges" '^(NoNewPrivileges|SystemCallFilter|SystemCallArchitectures|RestrictAddressFamilies|RestrictNamespaces|PrivateDevices|ProtectKernelTunables|ProtectKernelModules|ProtectKernelLogs|ProtectClock|MemoryDenyWriteExecute|RestrictRealtime|RestrictSUIDSGID|LockPersonality|DynamicUser)=' "$xvnc"
+check "xvnc empty capability bounding set" '^CapabilityBoundingSet=$' "$xvnc"
 
 # scrcpy mirrors at the native size into the appliance X display.
 check "scrcpy bound to emulator" '^BindsTo=android-appliance-emulator\.service android-appliance-xvnc\.service$' "$scrcpy"
