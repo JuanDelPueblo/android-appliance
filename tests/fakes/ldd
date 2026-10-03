@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Fake ldd for the SDK check tests. Like a real emulator binary, the
+# fake binary finds its bundled libraries only through LD_LIBRARY_PATH.
+# FAKE_LDD_MISSING names a host library that is not installed.
+bin=$1
+sdk=${bin%%/emulator/*}
+echo "	linux-vdso.so.1 (0x00007ffc)"
+path=":${LD_LIBRARY_PATH:-}:"
+case $path in
+  *":$sdk/emulator/lib64:"*) bundled=1 ;;
+  *) bundled=0 ;;
+esac
+case $path in
+  *":$sdk/emulator/lib64/qt/lib:"*) ;;
+  *) bundled=0 ;;
+esac
+case $bundled in
+  1)
+    echo "	libandroid-emu-shared.so => $sdk/emulator/lib64/libandroid-emu-shared.so (0x00007f00)"
+    echo "	libQt6Core.so.6 => $sdk/emulator/lib64/qt/lib/libQt6Core.so.6 (0x00007f00)"
+    ;;
+  *)
+    echo "	libandroid-emu-shared.so => not found"
+    echo "	libQt6Core.so.6 => not found"
+    ;;
+esac
+if [ -n "${FAKE_LDD_MISSING:-}" ]; then
+  echo "	$FAKE_LDD_MISSING => not found"
+fi

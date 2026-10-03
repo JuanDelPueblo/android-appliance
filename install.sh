@@ -200,17 +200,7 @@ fi
 [ -c /dev/kvm ] || echo "install.sh: WARNING /dev/kvm is missing; the emulator needs KVM" >&2
 if [ -x "$android_home/emulator/emulator" ]; then
   # The emulator needs host libraries that a minimal server can lack.
-  missing_libs=
-  for bin in "$android_home/emulator/emulator" "$android_home"/emulator/qemu/*/qemu-system-*; do
-    if [ -x "$bin" ]; then
-      missing_libs=$missing_libs$(ldd "$bin" 2>&1 | grep 'not found' || true)
-    fi
-  done
-  if [ -n "$missing_libs" ]; then
-    echo "install.sh: the emulator misses these host libraries:" >&2
-    printf '%s\n' "$missing_libs" | sed 's/^/  /' >&2
-    die "install them and re-run install.sh; dnf provides names their packages"
-  fi
+  "$here/scripts/provision-sdk.sh" --check || die "the SDK check failed; correct the problem and re-run install.sh"
 else
   echo "install.sh: WARNING the SDK is not installed at $android_home; run scripts/provision-sdk.sh" >&2
 fi

@@ -37,7 +37,8 @@ else
   echo "SKIP shellcheck (not installed)"
 fi
 
-for suite in androidctl-test.sh avd-init-test.sh appliance-env-test.sh units-test.sh install-test.sh; do
+for suite in androidctl-test.sh avd-init-test.sh appliance-env-test.sh units-test.sh \
+  provision-sdk-test.sh install-test.sh; do
   run "$suite" bash "tests/$suite"
 done
 

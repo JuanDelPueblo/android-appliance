@@ -181,6 +181,13 @@ The appliance also installs without Nix, with its own installer.
    ./scripts/provision-sdk.sh
    ```
 
+   `./scripts/provision-sdk.sh --check` checks an installed SDK and
+   changes nothing. It finds the emulator, adb and the system image,
+   and runs `ldd` on the emulator and the x86_64 qemu binaries. `ldd`
+   gets the bundled library path of the emulator (`emulator/lib64` and
+   `emulator/lib64/qt/lib`), as the `emulator` launcher does at run
+   time. Thus the check reports only missing host libraries.
+
 3. Copy the configuration, as root. The keys match the options above:
    `APPLIANCE_STATE_DIR` is `stateDir`, `APPLIANCE_API_LEVEL` is
    `apiLevel`, `APPLIANCE_IDLE_STOP_MINUTES` is `idleStopMinutes`, and
@@ -445,9 +452,9 @@ hermes plugins doctor . --ci       # Hermes runtime contract checks
 
 `run-tests.sh` runs ShellCheck, the `androidctl` lifecycle tests with
 fake `systemctl`, `adb` and idle commands, the `avd-init` tests, the
-configuration-loader tests, the unit-file checks, a staged installation
-test, the Hermes plugin tests and the dashboard tests. It needs no KVM.
-It reports a SKIP when a tool such as shellcheck, node or a Python
+configuration-loader tests, the unit-file checks, the SDK check tests
+with a fake `ldd`, a staged installation test, the Hermes plugin tests
+and the dashboard tests. It needs no KVM. It reports a SKIP when a tool such as shellcheck, node or a Python
 module is not installed.
 
 `nix flake check` runs:
