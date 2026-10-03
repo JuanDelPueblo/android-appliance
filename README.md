@@ -45,6 +45,8 @@ The design uses native parts only:
   including when adopting an AVD that previously used snapshots.
 - **Idle policy** is a timestamp file and a systemd timer. The timer is
   bound to the emulator unit, so nothing runs while Android is stopped.
+  The emulator unit wants the timer. The timer is not enabled at boot:
+  because of `BindsTo=`, an enabled timer would start Android at boot.
 - **Display** is Xvnc at 1080x1920 (the device native size), scrcpy, and
   noVNC (websockify in inetd mode). A systemd socket on loopback starts
   the chain at the first browser connection. The chain stops when the

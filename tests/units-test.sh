@@ -70,7 +70,9 @@ check "launcher gpu from config" '-gpu "\$gpu"' "$src/emulator-launch"
 # The idle policy runs only while the emulator unit is active.
 check "timer bound to emulator" '^BindsTo=android-appliance-emulator\.service$' "$timer"
 check "timer cadence" '^OnUnitActiveSec=30s$' "$timer"
-check "timer enabled at boot" '^WantedBy=timers\.target$' "$timer"
+# The emulator wants the timer. An enabled timer would start the
+# emulator at boot through BindsTo=, so the timer has no [Install].
+check_absent "timer not enabled at boot" '^\[Install\]' "$timer"
 check "idle runs androidctl" '^ExecStart=/usr/local/bin/androidctl idle-check$' "$idle"
 
 # The virtual display serves the device native size on a local socket.
@@ -102,8 +104,8 @@ check "display wants scrcpy" '^Wants=android-appliance-scrcpy\.service$' "$displ
 check "display part of emulator" '^PartOf=android-appliance-emulator\.service$' "$display"
 check "socket in sockets target" '^WantedBy=sockets\.target$' "$socket"
 
-# Only the idle timer and the display socket are enabled at boot.
-for unit in "$emu" "$idle" "$xvnc" "$scrcpy" "$display"; do
+# Only the display socket is enabled at boot.
+for unit in "$emu" "$idle" "$timer" "$xvnc" "$scrcpy" "$display"; do
   check_absent "no boot target: $(basename "$unit")" '^WantedBy=' "$unit"
 done
 

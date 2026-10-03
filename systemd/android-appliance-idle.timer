@@ -8,5 +8,5 @@ OnActiveSec=30s
 OnUnitActiveSec=30s
 AccuracySec=5s
 
-[Install]
-WantedBy=timers.target
+# There is no [Install] section. The emulator unit wants this timer.
+# Because of BindsTo=, an enabled timer would start Android at boot.

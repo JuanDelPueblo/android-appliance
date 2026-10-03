@@ -91,10 +91,19 @@ grep_file 'subject.user == "tester"' "$polkit"
 grep -q 'action.lookup("unit") == "android-appliance-emulator.service"' "$polkit"
 echo "ok   polkit rule"
 
-# A second run with the same configuration is idempotent.
+# A second run with the same configuration is idempotent. It also
+# removes the boot link of the idle timer that an earlier install.sh
+# made.
+mkdir -p "$units/timers.target.wants"
+ln -s "$units/android-appliance-idle.timer" "$units/timers.target.wants/android-appliance-idle.timer"
 bash "$here/../install.sh" --root "$root" >/dev/null
 grep_file '^User=tester$' "$dropin"
 echo "ok   idempotent re-run"
+if [ -L "$units/timers.target.wants/android-appliance-idle.timer" ]; then
+  echo "FAIL the idle timer is still enabled at boot" >&2
+  exit 1
+fi
+echo "ok   idle timer not enabled at boot"
 
 # Without a configuration the installer stages the example file and its
 # defaults: software GPU, so no host gpu drop-in.

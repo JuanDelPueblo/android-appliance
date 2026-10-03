@@ -133,6 +133,11 @@ else
   rm -f "$emu_dropin/51-gpu-host.conf"
 fi
 
+# The emulator unit wants the idle timer, so the timer is never enabled.
+# An earlier install.sh enabled it; remove that link. Because of BindsTo=,
+# the link made timers.target start Android at every boot.
+rm -f "$root$unit_dir/timers.target.wants/android-appliance-idle.timer"
+
 # The state directories and their ownership.
 mkdir -p "$root/etc/tmpfiles.d"
 cat >"$root/etc/tmpfiles.d/android-appliance.conf" <<EOF
@@ -209,7 +214,6 @@ fi
 systemd-tmpfiles --create "$root/etc/tmpfiles.d/android-appliance.conf"
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload
-  systemctl enable android-appliance-idle.timer
   if [ "$display_enabled" = 1 ]; then
     systemctl enable android-appliance-display.socket
   else
