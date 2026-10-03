@@ -2,7 +2,8 @@
 # install.sh: install the Android appliance on a systemd host.
 #
 # Run as root: ./install.sh
-# Staging mode for tests: ./install.sh --root DIR
+# Remove the appliance: ./install.sh --uninstall [--purge]
+# Staging mode for tests: ./install.sh --root DIR [--uninstall [--purge]]
 #
 # The configuration lives in /etc/android-appliance/appliance.conf. The
 # installer creates it from conf/appliance.conf.example when it is
@@ -14,21 +15,45 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 
 root=
-case ${1:-} in
-  --root) root=${2:?--root needs a directory} ;;
-  "") ;;
-  *)
-    echo "install.sh: unknown argument $1" >&2
-    exit 2
-    ;;
-esac
+uninstall=0
+purge=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    --root)
+      root=${2:?--root needs a directory}
+      shift 2
+      ;;
+    --uninstall)
+      uninstall=1
+      shift
+      ;;
+    --purge)
+      purge=1
+      shift
+      ;;
+    *)
+      echo "install.sh: unknown argument $1" >&2
+      exit 2
+      ;;
+  esac
+done
 
-config_file=$root/etc/android-appliance/appliance.conf
+config_dir=$root/etc/android-appliance
+config_file=$config_dir/appliance.conf
 state_home=/usr/local
 libexec=$state_home/libexec/android-appliance
 bindir=$state_home/bin
 unit_dir=/etc/systemd/system
 run_dir=/run/android-appliance
+units=(
+  android-appliance-emulator.service
+  android-appliance-idle.service
+  android-appliance-idle.timer
+  android-appliance-xvnc.service
+  android-appliance-scrcpy.service
+  android-appliance-display.service
+  android-appliance-display.socket
+)
 
 die() {
   echo "install.sh: $*" >&2
@@ -37,6 +62,76 @@ die() {
 
 if [ -z "$root" ] && [ "$(id -u)" != 0 ]; then
   die "run this script as root (or use --root DIR for staging)"
+fi
+[ "$purge" = 0 ] || [ "$uninstall" = 1 ] || die "--purge works only with --uninstall"
+
+# uninstall: remove what install.sh installed. Keep the SDK, the system
+# user and, without --purge, the configuration and the state directory.
+uninstall() {
+  local state_dir=${APPLIANCE_STATE_DIR:-/var/lib/android-appliance}
+  local unit
+
+  if [ -z "$root" ] && [ -d /run/systemd/system ]; then
+    # Stop Android while androidctl, the stop hook of the unit, exists.
+    systemctl disable --now android-appliance-display.socket 2>/dev/null || true
+    systemctl stop "${units[@]}" 2>/dev/null || true
+  fi
+
+  for unit in "${units[@]}"; do
+    rm -f "$root$unit_dir/$unit"
+    # Remove only the drop-ins of install.sh; keep a local drop-in.
+    rm -f "$root$unit_dir/$unit.d/50-appliance.conf" "$root$unit_dir/$unit.d/51-gpu-host.conf"
+    if [ -d "$root$unit_dir/$unit.d" ]; then
+      rmdir "$root$unit_dir/$unit.d" 2>/dev/null ||
+        echo "install.sh: kept $unit_dir/$unit.d, which has other drop-ins" >&2
+    fi
+  done
+  rm -f "$root$unit_dir/sockets.target.wants/android-appliance-display.socket" \
+    "$root$unit_dir/timers.target.wants/android-appliance-idle.timer"
+  rm -rf "$root$libexec"
+  rm -f "$root$bindir/androidctl" "$root$bindir/android-avd-init" \
+    "$root/etc/tmpfiles.d/android-appliance.conf" \
+    "$root/etc/polkit-1/rules.d/49-android-appliance.rules"
+  rm -rf "$root$run_dir"
+
+  if [ -z "$root" ] && [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    systemctl reset-failed "${units[@]}" 2>/dev/null || true
+  fi
+  echo "install.sh: removed the Android appliance"
+
+  if [ "$purge" = 1 ]; then
+    # Refuse a state directory that is not a dedicated directory.
+    case $state_dir in
+      /*) state_dir=$(realpath -m -- "$state_dir") ;;
+      *) die "APPLIANCE_STATE_DIR '$state_dir' is not an absolute path" ;;
+    esac
+    case $state_dir in
+      / | /var | /var/lib | /home | /home/* | /srv | /opt | /etc | /usr | /tmp | /root | /run)
+        case $state_dir in
+          /home/*/*) ;;
+          *) die "APPLIANCE_STATE_DIR '$state_dir' is not a dedicated directory; delete it yourself" ;;
+        esac
+        ;;
+    esac
+    rm -rf "$root$state_dir"
+    rm -rf "$config_dir"
+    echo "install.sh: deleted the state directory $state_dir and the configuration $config_dir"
+  else
+    echo "install.sh: kept the state directory $state_dir and the configuration $config_dir"
+    echo "install.sh: --uninstall --purge deletes them, with all apps and data of Android"
+  fi
+  echo "install.sh: kept the SDK ${APPLIANCE_ANDROID_HOME:-/opt/android-sdk} and the user ${APPLIANCE_USER:-android-appliance}"
+}
+
+if [ "$uninstall" = 1 ]; then
+  if [ -f "$config_file" ]; then
+    export ANDROID_APPLIANCE_CONFIG=$config_file
+    # shellcheck source=src/appliance-env
+    source "$here/src/appliance-env"
+  fi
+  uninstall
+  exit 0
 fi
 
 # Read the configuration into APPLIANCE_* variables.
@@ -83,14 +178,7 @@ ln -sfn "$libexec/androidctl" "$root$bindir/androidctl"
 ln -sfn "$libexec/avd-init" "$root$bindir/android-avd-init"
 
 # Install the unit files.
-for unit in \
-  android-appliance-emulator.service \
-  android-appliance-idle.service \
-  android-appliance-idle.timer \
-  android-appliance-xvnc.service \
-  android-appliance-scrcpy.service \
-  android-appliance-display.service \
-  android-appliance-display.socket; do
+for unit in "${units[@]}"; do
   install -Dm644 "$here/systemd/$unit" "$root$unit_dir/$unit"
 done
 

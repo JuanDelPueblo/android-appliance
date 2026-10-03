@@ -251,6 +251,29 @@ with mode `0744`, so `provision-sdk.sh` runs `chmod -R a+rX` on the SDK
 after the install. The check also warns when an installed revision is
 not the pin.
 
+### Remove the appliance
+
+Run as root:
+
+```bash
+./install.sh --uninstall
+```
+
+The command stops Android and the display, and disables the display
+socket. Then it removes the unit files, the drop-ins of `install.sh`,
+the boot links, the scripts and the `androidctl` links in
+`/usr/local`, the tmpfiles rule and the polkit rule. It keeps a drop-in
+that you added, the configuration in `/etc/android-appliance`, the
+state directory, the SDK and the system user.
+
+WARNING: `./install.sh --uninstall --purge` also deletes the state
+directory and the configuration. This deletes all apps, accounts and
+data on the device. The command refuses a shared directory such as
+`/var/lib` or a home directory.
+
+To remove the SDK, delete `APPLIANCE_ANDROID_HOME`. To remove the
+system user, run `userdel android-appliance`.
+
 ## Adopting an AVD from another appliance
 
 An AVD trusts the adb host key that created it. The old Juno service put

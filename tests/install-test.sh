@@ -105,6 +105,80 @@ if [ -L "$units/timers.target.wants/android-appliance-idle.timer" ]; then
 fi
 echo "ok   idle timer not enabled at boot"
 
+# --uninstall removes the installed files. It keeps a local drop-in,
+# the configuration and the state directory.
+mkdir -p "$root/var/appliance-test/avd"
+echo userdata >"$root/var/appliance-test/avd/userdata.img"
+echo "[Service]" >"$units/android-appliance-emulator.service.d/60-local.conf"
+mkdir -p "$units/sockets.target.wants"
+ln -s "$units/android-appliance-display.socket" "$units/sockets.target.wants/android-appliance-display.socket"
+bash "$here/../install.sh" --root "$root" --uninstall >/dev/null 2>&1
+for path in \
+  usr/local/libexec/android-appliance usr/local/bin/androidctl usr/local/bin/android-avd-init \
+  etc/tmpfiles.d/android-appliance.conf etc/polkit-1/rules.d/49-android-appliance.rules \
+  etc/systemd/system/sockets.target.wants/android-appliance-display.socket \
+  etc/systemd/system/android-appliance-xvnc.service.d \
+  etc/systemd/system/android-appliance-emulator.service.d/50-appliance.conf \
+  etc/systemd/system/android-appliance-emulator.service.d/51-gpu-host.conf; do
+  if [ -e "$root/$path" ] || [ -L "$root/$path" ]; then
+    echo "FAIL --uninstall left $path" >&2
+    exit 1
+  fi
+done
+for unit in "$units"/android-appliance-*; do
+  case $unit in
+    */android-appliance-emulator.service.d) ;;
+    *)
+      echo "FAIL --uninstall left $unit" >&2
+      exit 1
+      ;;
+  esac
+done
+echo "ok   uninstall removes the installed files"
+[ -f "$units/android-appliance-emulator.service.d/60-local.conf" ] || {
+  echo "FAIL --uninstall removed a local drop-in" >&2
+  exit 1
+}
+if [ ! -f "$root/var/appliance-test/avd/userdata.img" ] || [ ! -f "$root/etc/android-appliance/appliance.conf" ]; then
+  echo "FAIL --uninstall removed the state directory or the configuration" >&2
+  exit 1
+fi
+echo "ok   uninstall keeps local drop-ins, the configuration and the state"
+
+# --purge works only with --uninstall.
+if bash "$here/../install.sh" --root "$root" --purge >/dev/null 2>&1; then
+  echo "FAIL --purge without --uninstall must fail" >&2
+  exit 1
+fi
+
+# --uninstall --purge also deletes the state directory and the
+# configuration.
+bash "$here/../install.sh" --root "$root" --uninstall --purge >/dev/null 2>&1
+if [ -e "$root/var/appliance-test" ] || [ -e "$root/etc/android-appliance" ]; then
+  echo "FAIL --purge kept the state directory or the configuration" >&2
+  exit 1
+fi
+echo "ok   uninstall --purge deletes the state and the configuration"
+
+# --purge refuses a state directory that is not a dedicated directory.
+mkdir -p "$root/etc/android-appliance" "$root/var/lib/other"
+echo "APPLIANCE_STATE_DIR=/var/lib/" >"$root/etc/android-appliance/appliance.conf"
+if bash "$here/../install.sh" --root "$root" --uninstall --purge >/dev/null 2>&1; then
+  echo "FAIL --purge must refuse APPLIANCE_STATE_DIR=/var/lib/" >&2
+  exit 1
+fi
+[ -d "$root/var/lib/other" ] || {
+  echo "FAIL --purge deleted /var/lib" >&2
+  exit 1
+}
+echo "APPLIANCE_STATE_DIR=/home/tester" >"$root/etc/android-appliance/appliance.conf"
+mkdir -p "$root/home/tester"
+if bash "$here/../install.sh" --root "$root" --uninstall --purge >/dev/null 2>&1 || [ ! -d "$root/home/tester" ]; then
+  echo "FAIL --purge must refuse a home directory" >&2
+  exit 1
+fi
+echo "ok   uninstall --purge refuses a shared directory"
+
 # Without a configuration the installer stages the example file and its
 # defaults: software GPU, so no host gpu drop-in.
 root2=$(mktemp -d)
