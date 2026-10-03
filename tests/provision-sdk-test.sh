@@ -8,6 +8,8 @@ provision=$here/../scripts/provision-sdk.sh
 root=$(mktemp -d)
 trap 'rm -rf "$root"' EXIT
 export PATH="$here/fakes:$PATH"
+# The SDK check needs files that other users can read.
+umask 022
 
 fail() {
   echo "FAIL $*" >&2
@@ -51,6 +53,19 @@ case $out in
   *libQt6Core*) fail "the check must not report bundled libraries: $out" ;;
 esac
 echo "ok   check reports a missing host library"
+
+# A program that only its owner can run fails the check: the emulator
+# runs as the appliance user.
+chmod 0744 "$sdk/emulator/qemu/linux-x86_64/qemu-system-x86_64"
+if out=$(bash "$provision" --root "$root" --check 2>&1); then
+  fail "an emulator program with mode 0744 must fail the check"
+fi
+case $out in
+  *"chmod -R a+rX $sdk"*) ;;
+  *) fail "the check must give the chmod command: $out" ;;
+esac
+make_sdk
+echo "ok   check reports programs that the appliance user cannot run"
 
 # A missing system image for the configured API level fails.
 rm -rf "$sdk/system-images/android-35"

@@ -56,6 +56,18 @@ check_sdk() {
   [ -d "$sdk/system-images/android-$api/$image_tag/$abi" ] ||
     die "the system image android-$api;$image_tag;$abi is missing in $sdk"
 
+  # The emulator runs as APPLIANCE_USER, not as the owner of the SDK.
+  # sdkmanager installs the programs with mode 0744, which only the
+  # owner can run.
+  local denied
+  denied=$(find "$sdk/emulator" "$sdk/platform-tools" "$sdk/system-images/android-$api/$image_tag/$abi" \
+    \( -type f -perm -u+x ! -perm -o+x \) -o \( ! -perm -o+r \) -o \( -type d ! -perm -o+x \) | head -n 3)
+  if [ -n "$denied" ]; then
+    echo "provision-sdk: other users cannot read or run these SDK files:" >&2
+    printf '%s\n' "$denied" | sed 's/^/  /' >&2
+    die "run: chmod -R a+rX $sdk"
+  fi
+
   # The emulator needs host libraries that a minimal server can lack.
   # The emulator launcher adds its bundled libraries to LD_LIBRARY_PATH
   # before it starts qemu, so ldd gets the same path here.
@@ -103,6 +115,9 @@ yes | "$sdkmanager" --sdk_root="$sdk" --licenses >/dev/null
 
 echo "provision-sdk: installing platform-tools, emulator and the API $api image"
 "$sdkmanager" --sdk_root="$sdk" "platform-tools" "emulator" "system-images;android-$api;$image_tag;$abi"
+
+# The appliance user runs the SDK programs; sdkmanager gives them 0744.
+chmod -R a+rX "$sdk"
 
 check_sdk
 

@@ -186,7 +186,11 @@ The appliance also installs without Nix, with its own installer.
    and runs `ldd` on the emulator and the x86_64 qemu binaries. `ldd`
    gets the bundled library path of the emulator (`emulator/lib64` and
    `emulator/lib64/qt/lib`), as the `emulator` launcher does at run
-   time. Thus the check reports only missing host libraries.
+   time. Thus the check reports only missing host libraries. The check
+   also makes sure that other users can read and run the SDK files,
+   because the emulator runs as `APPLIANCE_USER`. `sdkmanager` installs
+   the programs with mode `0744`, so `provision-sdk.sh` runs
+   `chmod -R a+rX` on the SDK after the install.
 
 3. Copy the configuration, as root. The keys match the options above:
    `APPLIANCE_STATE_DIR` is `stateDir`, `APPLIANCE_API_LEVEL` is
