@@ -7,3 +7,5 @@ uvicorn
 websockets
 pillow
 mcp
+# appliance.client (also a dependency of mcp)
+httpx2
