@@ -1,0 +1,9 @@
+# Runtime dependencies of the appliance daemon (container image).
+# Regenerate requirements.lock with scripts/lock-deps.sh.
+grpcio==1.84.0
+protobuf==7.36.2
+starlette
+uvicorn
+websockets
+pillow
+mcp

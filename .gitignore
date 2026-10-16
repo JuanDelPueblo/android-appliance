@@ -3,3 +3,5 @@ result-*
 __pycache__/
 *.pyc
 HANDOFF.md
+.venv/
+appliance/_proto/
