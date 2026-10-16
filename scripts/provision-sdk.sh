@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # provision-sdk.sh: install the pinned Android SDK without a package
-# manager. install.sh runs it; you can also run it alone.
+# manager. legacy/install.sh runs it; you can also run it alone.
 #
 # Run as root: ./scripts/provision-sdk.sh
 # Check an installed SDK and change nothing: ./scripts/provision-sdk.sh --check

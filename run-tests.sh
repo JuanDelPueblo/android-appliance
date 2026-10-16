@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # run-tests.sh: run every test suite that needs no emulator.
 #
-# It runs the bash tests, the Hermes plugin tests and the dashboard
-# tests, and reports a clear SKIP when a tool is not installed.
+# It runs ShellCheck, the bash tests of v2 and of the v1 scripts, the
+# Python tests (in the .venv of scripts/dev-venv.sh), the Hermes plugin
+# tests and the dashboard tests, and reports a clear SKIP when a tool is
+# not installed.
 set -uo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -30,28 +32,46 @@ run() {
 }
 
 if command -v shellcheck >/dev/null 2>&1; then
-  run "shellcheck" shellcheck -x \
-    src/androidctl src/avd-init src/appliance-env src/emulator-launch src/display-scrcpy \
-    install.sh scripts/provision-sdk.sh tests/*.sh tests/fakes/*
+  scripts=(bin/androidctl install.sh legacy/*.sh scripts/*.sh tests/*.sh tests/e2e/*.sh
+    src/androidctl src/avd-init src/appliance-env src/emulator-launch src/display-scrcpy)
+  for file in tests/fakes/*; do
+    case $file in *.py) ;; *) scripts+=("$file") ;; esac
+  done
+  run "shellcheck" shellcheck -x "${scripts[@]}"
 else
   echo "SKIP shellcheck (not installed)"
 fi
 
-for suite in androidctl-test.sh avd-init-test.sh appliance-env-test.sh units-test.sh \
-  provision-sdk-test.sh install-test.sh; do
-  run "$suite" bash "tests/$suite"
+for suite in tests/*-test.sh legacy/*-test.sh; do
+  if [ "$suite" = tests/androidctl-v2-test.sh ] && ! command -v python3 >/dev/null 2>&1; then
+    echo "SKIP $suite (python3 runs its fake appliance API)"
+    continue
+  fi
+  run "$suite" bash "$suite"
 done
 
 if command -v python3 >/dev/null 2>&1; then
   python3 -m py_compile src/display-idle
   report "display-idle compiles" $?
   if python3 -c 'import aiohttp, fastapi, httpx, yaml' 2>/dev/null; then
-    run "test_plugin.py" python3 -m unittest discover -s tests -v
+    run "test_plugin.py" python3 -m unittest discover -s tests -p test_plugin.py -v
   else
     echo "SKIP test_plugin.py (python modules missing; on Fedora run: dnf install python3-aiohttp python3-fastapi python3-httpx python3-pyyaml)"
   fi
 else
-  echo "SKIP display-idle and test_plugin.py (python3 not installed)"
+  echo "SKIP androidctl-v2-test.sh, display-idle and test_plugin.py (python3 not installed)"
+fi
+
+if [ ! -d tests/python ]; then
+  echo "SKIP tests/python (the directory is missing)"
+elif command -v uv >/dev/null 2>&1; then
+  if python=$(scripts/dev-venv.sh); then
+    run "tests/python" "$python" -m pytest -q tests/python
+  else
+    report "tests/python (scripts/dev-venv.sh failed)" 1
+  fi
+else
+  echo "SKIP tests/python (uv not installed; it creates the test environment)"
 fi
 
 if command -v node >/dev/null 2>&1; then

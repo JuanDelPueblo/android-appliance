@@ -1,343 +1,854 @@
 #!/usr/bin/env bash
-# install.sh: install the Android appliance on a systemd host.
+# install.sh: install the Android appliance as a rootless Podman
+# container that a systemd user unit (Quadlet) runs.
 #
-# Run as root: ./install.sh
-# Remove the appliance: ./install.sh --uninstall [--purge]
-# Staging mode for tests: ./install.sh --root DIR [--uninstall [--purge]]
+# Run it as the user who owns the appliance, not as root:
+#   ./install.sh [--config FILE] [--no-build] [--no-start]
+#   ./install.sh --rollback          go back to the previous image
+#   ./install.sh --uninstall [--purge]
+#   ./install.sh --doctor            check the host
+#   ./install.sh --print-run         install for a host without systemd
+# Staging mode for tests: ./install.sh --root DIR [...]
 #
-# The configuration lives in /etc/android-appliance/appliance.conf. The
-# installer creates it from conf/appliance.conf.example when it is
-# missing, then applies it. It also installs the pinned Android SDK
-# with scripts/provision-sdk.sh. Edit the file and run the installer
-# again to apply a change; it is idempotent.
+# The configuration file (default ~/.config/android-appliance/appliance.conf)
+# is created from conf/appliance.conf.example when it is missing. Edit it
+# and run the installer again to apply a change; it is idempotent. The
+# v1 installer (system units, no container) is legacy/install.sh.
+# APPLIANCE_INSTALL_WAIT=SECONDS sets how long it waits for the daemon
+# after the restart (default 60).
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 
-root=
-uninstall=0
-purge=0
-while [ $# -gt 0 ]; do
-  case $1 in
-    --root)
-      root=${2:?--root needs a directory}
-      shift 2
-      ;;
-    --uninstall)
-      uninstall=1
-      shift
-      ;;
-    --purge)
-      purge=1
-      shift
-      ;;
-    *)
-      echo "install.sh: unknown argument $1" >&2
-      exit 2
-      ;;
-  esac
-done
+usage() {
+  cat <<'EOF'
+usage: install.sh [--config FILE] [--no-build] [--no-start] [--root DIR]
+       install.sh --rollback [--config FILE] [--no-start] [--root DIR]
+       install.sh --uninstall [--purge] [--config FILE] [--root DIR]
+       install.sh --print-run [--config FILE] [--no-build] [--root DIR]
+       install.sh --doctor [--config FILE]
 
-config_dir=$root/etc/android-appliance
-config_file=$config_dir/appliance.conf
-state_home=/usr/local
-libexec=$state_home/libexec/android-appliance
-bindir=$state_home/bin
-unit_dir=/etc/systemd/system
-run_dir=/run/android-appliance
-units=(
-  android-appliance-emulator.service
-  android-appliance-idle.service
-  android-appliance-idle.timer
-  android-appliance-xvnc.service
-  android-appliance-scrcpy.service
-  android-appliance-display.service
-  android-appliance-display.socket
-)
+  --config FILE  the configuration file of the instance
+  --no-build     use the existing image instead of building it
+  --no-start     write the unit, but do not (re)start it
+  --rollback     switch the unit back to the previous image
+  --uninstall    remove the unit, the images and androidctl; keep the
+                 state and the configuration
+  --purge        with --uninstall: also delete the state directory (all
+                 apps and data of Android) and the configuration
+  --print-run    install without systemd, and print the podman run command
+  --doctor       check the host (androidctl doctor)
+  --root DIR     stage every file under DIR; run no podman or systemctl
+EOF
+}
 
 die() {
   echo "install.sh: $*" >&2
   exit 1
 }
 
-if [ -z "$root" ] && [ "$(id -u)" != 0 ]; then
-  die "run this script as root (or use --root DIR for staging)"
-fi
-[ "$purge" = 0 ] || [ "$uninstall" = 1 ] || die "--purge works only with --uninstall"
-
-# uninstall: remove what install.sh installed. Keep the SDK, the system
-# user and, without --purge, the configuration and the state directory.
-uninstall() {
-  local state_dir=${APPLIANCE_STATE_DIR:-/var/lib/android-appliance}
-  local unit
-
-  if [ -z "$root" ] && [ -d /run/systemd/system ]; then
-    # Stop Android while androidctl, the stop hook of the unit, exists.
-    systemctl disable --now android-appliance-display.socket 2>/dev/null || true
-    systemctl stop "${units[@]}" 2>/dev/null || true
-  fi
-
-  for unit in "${units[@]}"; do
-    rm -f "$root$unit_dir/$unit"
-    # Remove only the drop-ins of install.sh; keep a local drop-in.
-    rm -f "$root$unit_dir/$unit.d/50-appliance.conf" "$root$unit_dir/$unit.d/51-gpu-host.conf"
-    if [ -d "$root$unit_dir/$unit.d" ]; then
-      rmdir "$root$unit_dir/$unit.d" 2>/dev/null ||
-        echo "install.sh: kept $unit_dir/$unit.d, which has other drop-ins" >&2
-    fi
-  done
-  rm -f "$root$unit_dir/sockets.target.wants/android-appliance-display.socket" \
-    "$root$unit_dir/timers.target.wants/android-appliance-idle.timer"
-  rm -rf "$root$libexec"
-  rm -f "$root$bindir/androidctl" "$root$bindir/android-avd-init" \
-    "$root/etc/tmpfiles.d/android-appliance.conf" \
-    "$root/etc/polkit-1/rules.d/49-android-appliance.rules"
-  rm -rf "$root$run_dir"
-
-  if [ -z "$root" ] && [ -d /run/systemd/system ]; then
-    systemctl daemon-reload
-    systemctl reset-failed "${units[@]}" 2>/dev/null || true
-  fi
-  echo "install.sh: removed the Android appliance"
-
-  if [ "$purge" = 1 ]; then
-    # Refuse a state directory that is not a dedicated directory.
-    case $state_dir in
-      /*) state_dir=$(realpath -m -- "$state_dir") ;;
-      *) die "APPLIANCE_STATE_DIR '$state_dir' is not an absolute path" ;;
-    esac
-    case $state_dir in
-      / | /var | /var/lib | /home | /home/* | /srv | /opt | /etc | /usr | /tmp | /root | /run)
-        case $state_dir in
-          /home/*/*) ;;
-          *) die "APPLIANCE_STATE_DIR '$state_dir' is not a dedicated directory; delete it yourself" ;;
-        esac
-        ;;
-    esac
-    rm -rf "$root$state_dir"
-    rm -rf "$config_dir"
-    echo "install.sh: deleted the state directory $state_dir and the configuration $config_dir"
-  else
-    echo "install.sh: kept the state directory $state_dir and the configuration $config_dir"
-    echo "install.sh: --uninstall --purge deletes them, with all apps and data of Android"
-  fi
-  echo "install.sh: kept the SDK ${APPLIANCE_ANDROID_HOME:-/opt/android-sdk} and the user ${APPLIANCE_USER:-android-appliance}"
+usage_error() {
+  echo "install.sh: $*" >&2
+  usage >&2
+  exit 2
 }
 
-if [ "$uninstall" = 1 ]; then
-  if [ -f "$config_file" ]; then
-    export ANDROID_APPLIANCE_CONFIG=$config_file
-    # shellcheck source=src/appliance-env
-    source "$here/src/appliance-env"
-  fi
-  uninstall
-  exit 0
-fi
-
-# Read the configuration into APPLIANCE_* variables.
-if [ ! -f "$config_file" ]; then
-  install -Dm644 "$here/conf/appliance.conf.example" "$config_file"
-  echo "install.sh: created $config_file from the example; edit it and re-run to customize"
-fi
-export ANDROID_APPLIANCE_CONFIG=$config_file
-# shellcheck source=src/appliance-env
-source "$here/src/appliance-env"
-
-state_dir=${APPLIANCE_STATE_DIR:-/var/lib/android-appliance}
-user=${APPLIANCE_USER:-android-appliance}
-group=${APPLIANCE_GROUP:-android-appliance}
-gpu=${APPLIANCE_GPU:-swiftshader}
-display_port=${APPLIANCE_DISPLAY_PORT:-6090}
-android_home=${APPLIANCE_ANDROID_HOME:-/opt/android-sdk}
-
-case ${APPLIANCE_SDK_MANAGED:-1} in
-  1 | true | yes) sdk_managed=1 ;;
-  0 | false | no) sdk_managed=0 ;;
-  *) die "APPLIANCE_SDK_MANAGED must be 1 or 0" ;;
-esac
-
-case ${APPLIANCE_DISPLAY_ENABLED:-1} in
-  1 | true | yes) display_enabled=1 ;;
-  0 | false | no) display_enabled=0 ;;
-  *) die "APPLIANCE_DISPLAY_ENABLED must be 1 or 0" ;;
-esac
-case $gpu in
-  swiftshader | host | software | lavapipe | swangle | auto) ;;
-  *) die "APPLIANCE_GPU '$gpu' is not a known -gpu mode" ;;
-esac
-
-# Stage the scripts and their links.
-install -Dm755 "$here/src/androidctl" "$root$libexec/androidctl"
-install -Dm755 "$here/src/avd-init" "$root$libexec/avd-init"
-install -Dm755 "$here/src/appliance-env" "$root$libexec/appliance-env"
-install -Dm755 "$here/src/emulator-launch" "$root$libexec/emulator-launch"
-install -Dm755 "$here/src/display-scrcpy" "$root$libexec/display-scrcpy"
-install -Dm755 "$here/src/display-idle" "$root$libexec/display-idle"
-install -d "$root$bindir"
-ln -sfn "$libexec/androidctl" "$root$bindir/androidctl"
-ln -sfn "$libexec/avd-init" "$root$bindir/android-avd-init"
-
-# Install the unit files.
-for unit in "${units[@]}"; do
-  install -Dm644 "$here/systemd/$unit" "$root$unit_dir/$unit"
+root=
+config=
+build=1
+start=1
+action=install
+purge=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    --config | --root)
+      [ $# -ge 2 ] && [ -n "$2" ] || usage_error "$1 needs an argument"
+      if [ "$1" = --config ]; then config=$2; else root=$2; fi
+      shift 2
+      ;;
+    --no-build)
+      build=0
+      shift
+      ;;
+    --no-start)
+      start=0
+      shift
+      ;;
+    --rollback | --uninstall | --doctor | --print-run)
+      [ "$action" = install ] || usage_error "$1 does not combine with --$action"
+      action=${1#--}
+      shift
+      ;;
+    --purge)
+      purge=1
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *) usage_error "unknown argument $1" ;;
+  esac
 done
-
-# Deployment drop-in: the user, the group and the state paths.
-service_dropin() {
-  local unit=$1 service_extra=${2:-} unit_extra=${3:-}
-  mkdir -p "$root$unit_dir/$unit.d"
-  {
-    echo "# Managed by install.sh. Edit appliance.conf and re-run install.sh."
-    if [ -n "$unit_extra" ]; then
-      printf '[Unit]\n%s\n' "$unit_extra"
-    fi
-    printf '[Service]\nUser=%s\nGroup=%s\nReadWritePaths=%s %s /tmp\n' "$user" "$group" "$state_dir" "$run_dir"
-    if [ -n "$service_extra" ]; then
-      printf '%s\n' "$service_extra"
-    fi
-  } >"$root$unit_dir/$unit.d/50-appliance.conf"
-}
-service_dropin android-appliance-emulator.service "WorkingDirectory=$state_dir" "RequiresMountsFor=$state_dir"
-service_dropin android-appliance-idle.service
-service_dropin android-appliance-xvnc.service
-service_dropin android-appliance-scrcpy.service
-service_dropin android-appliance-display.service
-
-# The socket listens on the configured loopback port. The base unit has
-# no ListenStream, so this is the only listener.
-mkdir -p "$root$unit_dir/android-appliance-display.socket.d"
-cat >"$root$unit_dir/android-appliance-display.socket.d/50-appliance.conf" <<EOF
-# Managed by install.sh. Edit appliance.conf and re-run install.sh.
-[Socket]
-ListenStream=127.0.0.1:$display_port
-EOF
-
-# Host GPU rendering: the X server, the extra groups and the socket bind.
-emu_dropin=$root$unit_dir/android-appliance-emulator.service.d
-if [ "$gpu" = host ]; then
-  cat >"$emu_dropin/51-gpu-host.conf" <<EOF
-# Managed by install.sh. Edit appliance.conf and re-run install.sh.
-[Unit]
-Requires=android-appliance-xvnc.service
-After=android-appliance-xvnc.service
-[Service]
-SupplementaryGroups=kvm render video
-BindPaths=/tmp/.X11-unix
-EOF
-else
-  rm -f "$emu_dropin/51-gpu-host.conf"
-fi
-
-# The emulator unit wants the idle timer, so the timer is never enabled.
-# An earlier install.sh enabled it; remove that link. Because of BindsTo=,
-# the link made timers.target start Android at every boot.
-rm -f "$root$unit_dir/timers.target.wants/android-appliance-idle.timer"
-
-# The state directories and their ownership.
-mkdir -p "$root/etc/tmpfiles.d"
-cat >"$root/etc/tmpfiles.d/android-appliance.conf" <<EOF
-# Managed by install.sh. Edit appliance.conf and re-run install.sh.
-d $state_dir 0750 $user $group -
-d $state_dir/home 0750 $user $group -
-d $state_dir/screenshots 0750 $user $group -
-d $run_dir 0750 $user $group -
-EOF
-
-# Only the appliance user may start, stop or restart the emulator unit.
-mkdir -p "$root/etc/polkit-1/rules.d"
-cat >"$root/etc/polkit-1/rules.d/49-android-appliance.rules" <<EOF
-// Managed by install.sh. Edit appliance.conf and re-run install.sh.
-polkit.addRule(function (action, subject) {
-  if (action.id == "org.freedesktop.systemd1.manage-units" &&
-      subject.user == "$user" &&
-      action.lookup("unit") == "android-appliance-emulator.service" &&
-      ["start", "stop", "restart"].indexOf(action.lookup("verb")) >= 0) {
-    return polkit.Result.YES;
-  }
-});
-EOF
+[ "$purge" = 0 ] || [ "$action" = uninstall ] || usage_error "--purge works only with --uninstall"
 
 if [ -n "$root" ]; then
-  echo "install.sh: staged the appliance under $root; the SDK is not provisioned"
-  exit 0
+  root=$(realpath -m -- "$root")
+  [ "$root" != / ] || die "--root / is not a staging directory"
+elif [ "$(id -u)" = 0 ]; then
+  die "run install.sh as the user who owns the appliance, not as root; the container runs rootless"
+fi
+[ -n "${HOME:-}" ] || die "HOME is not set"
+
+user=$(id -un)
+config_home=${XDG_CONFIG_HOME:-$HOME/.config}
+data_home=${XDG_DATA_HOME:-$HOME/.local/share}
+runtime_base=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+config_file=${config:-$config_home/android-appliance/appliance.conf}
+case $config_file in /*) ;; *) config_file=$PWD/$config_file ;; esac
+config_file=$(realpath -m -s -- "$config_file")
+config_dir=$(dirname "$config_file")
+
+if [ "$action" = doctor ]; then
+  ANDROID_APPLIANCE_CONFIG=$root$config_file exec "$here/bin/androidctl" doctor
 fi
 
-# The appliance user and group.
-getent group "$group" >/dev/null || groupadd --system "$group"
-if ! id -u "$user" >/dev/null 2>&1; then
-  useradd --system --gid "$group" --home-dir "$state_dir" --no-create-home --shell /usr/sbin/nologin "$user"
-  echo "install.sh: created the system user $user"
-fi
+warnings=()
+warn() { warnings+=("$*"); }
 
-# Check the operating-system packages of the enabled parts.
-missing=()
-missing_scrcpy=0
-need_binary() {
-  command -v "$1" >/dev/null 2>&1 || missing+=("$2")
+# Fill unset APPLIANCE_* variables from the configuration file. The
+# container reads the same file as its podman environment file, so
+# refuse every line that podman would read differently.
+read_config() {
+  local line key n=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    case $line in
+      '' | '#'*) continue ;;
+      APPLIANCE_*=*) ;;
+      *) die "$config_file:$n: '$line' is not an APPLIANCE_*=value line" ;;
+    esac
+    key=${line%%=*}
+    case $key in *[!A-Z0-9_]*) die "$config_file:$n: '$key' is not a valid key" ;; esac
+    if [ -z "${!key:-}" ]; then
+      printf -v "$key" '%s' "${line#*=}"
+    fi
+  done <"$root$config_file"
 }
-need_file() {
-  [ -e "$1" ] || missing+=("$2")
+
+# config_value FILE KEY DEFAULT: the first value of KEY in another
+# configuration file (the v1 one), without touching the environment.
+config_value() {
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+      "$2="*)
+        echo "${line#*=}"
+        return
+        ;;
+    esac
+  done <"$1"
+  echo "$3"
 }
-if [ "$display_enabled" = 1 ] || [ "$gpu" = host ]; then
-  need_binary Xvnc tigervnc-x11-server
-  need_binary xdpyinfo xdpyinfo
-fi
-if [ "$display_enabled" = 1 ]; then
-  # Fedora 44 ships no scrcpy; the zeno/scrcpy COPR provides it.
-  command -v scrcpy >/dev/null 2>&1 || missing_scrcpy=1
-  need_binary websockify python3-websockify
-  need_file /usr/share/novnc/vnc.html novnc
-  need_binary python3 python3
-  ldconfig -p 2>/dev/null | grep -q libXss.so || missing+=(libXScrnSaver)
-fi
-if [ "$sdk_managed" = 1 ]; then
-  need_binary curl curl
-  need_binary unzip unzip
-fi
-if [ "${#missing[@]}" -gt 0 ]; then
-  die "missing packages: ${missing[*]}; run: dnf install ${missing[*]}"
-fi
-if [ "$missing_scrcpy" = 1 ]; then
-  die "scrcpy is missing; run: dnf install dnf-plugins-core && dnf copr enable zeno/scrcpy && dnf install scrcpy"
-fi
 
-[ -c /dev/kvm ] || echo "install.sh: WARNING /dev/kvm is missing; the emulator needs KVM" >&2
+# Values end up in the unit, where systemd gives % and spaces a meaning,
+# and in podman -v and -p arguments, where : and , separate fields.
+check_path() {
+  [[ $2 =~ ^/[A-Za-z0-9._/+@=~-]*$ ]] ||
+    die "$1 '$2' must be an absolute path of letters, digits and ._/+@=~-"
+}
 
-# The Android SDK. provision-sdk.sh installs the pinned packages; it
-# downloads nothing when they are in place. Both modes check the SDK,
-# including the host libraries of the emulator.
-if [ "$sdk_managed" = 1 ]; then
-  "$here/scripts/provision-sdk.sh" || die "the SDK installation failed; correct the problem and re-run install.sh"
-elif [ -x "$android_home/emulator/emulator" ]; then
-  "$here/scripts/provision-sdk.sh" --check || die "the SDK check failed; correct the problem and re-run install.sh"
-else
-  echo "install.sh: WARNING the SDK is not installed at $android_home, and APPLIANCE_SDK_MANAGED=0" >&2
-fi
+check_port() {
+  [[ $2 =~ ^[0-9]{1,5}$ ]] && [ "$2" -ge 1 ] && [ "$2" -le 65535 ] ||
+    die "$1 '$2' is not a port number"
+}
 
-# Give the installed files their SELinux labels.
-if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled && command -v restorecon >/dev/null 2>&1; then
-  restorecon -R "$libexec" "$bindir/androidctl" "$bindir/android-avd-init" \
-    "$unit_dir"/android-appliance-* /etc/tmpfiles.d/android-appliance.conf \
-    /etc/polkit-1/rules.d/49-android-appliance.rules /etc/android-appliance
-fi
+load_settings() {
+  name=${APPLIANCE_NAME:-android-appliance}
+  state_dir=${APPLIANCE_STATE_DIR:-$data_home/android-appliance}
+  listen=${APPLIANCE_LISTEN_ADDRESS:-127.0.0.1}
+  port=${APPLIANCE_PORT:-6090}
+  turn_port=${APPLIANCE_TURN_PORT:-3478}
+  api=${APPLIANCE_API_LEVEL:-36}
+  gpu=${APPLIANCE_GPU:-auto}
+  gpu_device=${APPLIANCE_GPU_DEVICE:-auto}
+  bin_dir=${APPLIANCE_BIN_DIR:-$HOME/.local/bin}
+  quadlet_dir=${APPLIANCE_QUADLET_DIR:-$config_home/containers/systemd}
+  [ -f "$here/VERSION" ] || die "$here/VERSION is missing"
+  version=$(<"$here/VERSION")
+  image=${APPLIANCE_IMAGE:-localhost/android-appliance:$version-api$api}
 
-# Apply the unit set and the state directories.
-systemd-tmpfiles --create "$root/etc/tmpfiles.d/android-appliance.conf"
-if [ -d /run/systemd/system ]; then
-  systemctl daemon-reload
-  if [ "$display_enabled" = 1 ]; then
-    systemctl enable --now android-appliance-display.socket
+  [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] ||
+    die "APPLIANCE_NAME '$name' must be letters, digits and ._- (a container and unit name)"
+  check_path APPLIANCE_STATE_DIR "$state_dir"
+  check_path APPLIANCE_BIN_DIR "$bin_dir"
+  check_path APPLIANCE_QUADLET_DIR "$quadlet_dir"
+  check_path "the configuration file" "$config_file"
+  state_dir=$(realpath -m -s -- "$state_dir")
+  bin_dir=$(realpath -m -s -- "$bin_dir")
+  quadlet_dir=$(realpath -m -s -- "$quadlet_dir")
+  check_port APPLIANCE_PORT "$port"
+  check_port APPLIANCE_TURN_PORT "$turn_port"
+  [ "$port" != "$turn_port" ] || die "APPLIANCE_PORT and APPLIANCE_TURN_PORT must differ"
+  if [[ $listen =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    publish_address=$listen
+  elif [[ $listen =~ ^[0-9A-Fa-f:.]+$ ]] && [[ $listen == *:* ]]; then
+    publish_address="[$listen]"
   else
-    systemctl disable --now android-appliance-display.socket 2>/dev/null || true
+    die "APPLIANCE_LISTEN_ADDRESS '$listen' is not an IPv4 or IPv6 address"
   fi
-else
-  echo "install.sh: systemd is not running; skipped daemon-reload and unit enablement" >&2
-fi
+  case $listen in
+    127.* | ::1) ;;
+    *) warn "APPLIANCE_LISTEN_ADDRESS=$listen publishes the API on the network as plain HTTP: the token, the session cookie and the screenshots can be read on the way. Keep 127.0.0.1, or put a reverse proxy with TLS in front of the port and set APPLIANCE_TRUST_PROXY=1." ;;
+  esac
+  [[ $api =~ ^[0-9]+$ ]] || die "APPLIANCE_API_LEVEL '$api' is not a number"
+  case $gpu in
+    auto | host | lavapipe) ;;
+    *) die "APPLIANCE_GPU '$gpu' must be auto, host or lavapipe" ;;
+  esac
+  [ "$gpu_device" = auto ] || check_path APPLIANCE_GPU_DEVICE "$gpu_device"
+  [[ $image =~ ^[A-Za-z0-9][A-Za-z0-9._:/@-]*$ ]] || die "APPLIANCE_IMAGE '$image' is not an image name"
 
-echo
-echo "install.sh: installed the Android appliance"
-echo "install.sh:   androidctl:    $bindir/androidctl"
-echo "install.sh:   configuration: $config_file"
-echo "install.sh:   state:         $state_dir (user $user, group $group)"
-echo "install.sh:   gpu:           $gpu, display: $display_enabled (port $display_port)"
-echo "install.sh: start it with: androidctl start"
+  unit=$name.service
+  unit_file=$quadlet_dir/$name.container
+  override_file=$config_dir/$name.containers.conf
+  images_file=$config_dir/$name.images
+  runtime_dir=$runtime_base/$name
+}
+
+# overlaps A B: succeed when one directory is, or contains, the other.
+overlaps() {
+  case "$1/" in "$2"/*) return 0 ;; esac
+  case "$2/" in "$1"/*) return 0 ;; esac
+  return 1
+}
+
+# install.sh marks a state directory with the name of the instance that
+# uses it. Two instances must not share one, and --purge must not delete a
+# directory that is not an appliance state.
+state_marker=.android-appliance-instance
+
+# state_owner DIR: the instance that the marker of DIR names.
+state_owner() {
+  local line=
+  if [ -f "$root$1/$state_marker" ]; then IFS= read -r line <"$root$1/$state_marker" || true; fi
+  printf '%s' "$line"
+}
+
+# looks_like_state DIR: DIR has the files of an appliance (v2 or v1).
+looks_like_state() {
+  [ -d "$root$1/appliance" ] || [ -d "$root$1/avd" ]
+}
+
+# unused_dir DIR: DIR does not exist or is empty.
+unused_dir() {
+  [ ! -d "$root$1" ] || [ -z "$(ls -A -- "$root$1")" ]
+}
+
+# check_state_dir: the directory is new, empty, the state of this instance
+# or an adopted appliance state, and its AVD matches the API level.
+check_state_dir() {
+  local owner avd level ini
+  owner=$(state_owner "$state_dir")
+  if [ -n "$owner" ] && [ "$owner" != "$name" ]; then
+    die "the state directory $state_dir belongs to the appliance '$owner'; give '$name' a directory of its own (APPLIANCE_STATE_DIR in $config_file)"
+  fi
+  if [ -z "$owner" ] && ! unused_dir "$state_dir" && ! looks_like_state "$state_dir"; then
+    die "the state directory $state_dir is not empty and holds no appliance state; use an empty directory of its own (APPLIANCE_STATE_DIR in $config_file)"
+  fi
+  # An AVD keeps its API level; the daemon refuses another image at the first boot.
+  avd=${APPLIANCE_AVD_NAME:-android}
+  ini=$root$state_dir/avd/$avd.avd/config.ini
+  if [[ $avd =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && [ -f "$ini" ]; then
+    level=$(sed -n 's|^image\.sysdir\.1 *= *system-images/android-\([0-9][0-9]*\)/.*|\1|p' "$ini" | head -n 1)
+    if [ -n "$level" ] && [ "$level" != "$api" ]; then
+      die "the AVD in $state_dir uses API level $level, but APPLIANCE_API_LEVEL is $api; set APPLIANCE_API_LEVEL=$level in $config_file (an AVD keeps its API level), or use another state directory"
+    fi
+  fi
+}
+
+# check_unit_owner: an installed unit of this name belongs to this
+# configuration. Another configuration with the same name, or a mistyped
+# --config, would take the unit over and leave the first one orphaned.
+check_unit_owner() {
+  [ -f "$root$unit_file" ] && grep -q '^# Managed by install.sh' "$root$unit_file" || return 0
+  local owner
+  owner=$(sed -n 's/^EnvironmentFile=//p' "$root$unit_file" | head -n 1)
+  if [ "$owner" != "$config_file" ]; then
+    die "$unit_file belongs to the configuration $owner, not to $config_file. For a second instance set another APPLIANCE_NAME, APPLIANCE_STATE_DIR and ports in $config_file; to replace the first one, run install.sh --uninstall --config $owner"
+  fi
+}
+
+# A v1 appliance (system units) on the same host must keep its state
+# directory and its display port.
+v1_unit=/etc/systemd/system/android-appliance-emulator.service
+v1_conf=/etc/android-appliance/appliance.conf
+
+# v1_setting KEY DEFAULT: a value of the v1 configuration.
+v1_setting() {
+  if [ -f "$root$v1_conf" ]; then
+    config_value "$root$v1_conf" "$1" "$2"
+  else
+    echo "$2"
+  fi
+}
+
+check_v1() {
+  [ -e "$root$v1_unit" ] || return 0
+  local v1_state v1_port
+  v1_state=$(realpath -m -s -- "$(v1_setting APPLIANCE_STATE_DIR /var/lib/android-appliance)")
+  v1_port=$(v1_setting APPLIANCE_DISPLAY_PORT 6090)
+  if overlaps "$state_dir" "$v1_state"; then
+    die "a v1 appliance uses $v1_state ($v1_unit); set APPLIANCE_STATE_DIR in $config_file to a separate directory"
+  fi
+  if [ "$port" = "$v1_port" ] || [ "$turn_port" = "$v1_port" ]; then
+    die "a v1 appliance uses port $v1_port ($v1_unit); set APPLIANCE_PORT and APPLIANCE_TURN_PORT in $config_file to other ports"
+  fi
+  warn "a v1 appliance is installed ($v1_unit). This instance runs beside it with its own state directory and port; do not boot both emulators at once on a small host. $bin_dir/androidctl controls this instance, /usr/local/bin/androidctl the v1 appliance."
+}
+
+# Devices: /dev/kvm always, the render node unless lavapipe. The user
+# reaches a device that is not world-accessible through its groups,
+# which the container keeps only with keep-groups.
+detect_devices() {
+  local node mode
+  render=
+  group_add=0
+  if [ ! -e "$root/dev/kvm" ]; then
+    warn "/dev/kvm is missing; the emulator needs KVM"
+  elif [ ! -r "$root/dev/kvm" ] || [ ! -w "$root/dev/kvm" ]; then
+    warn "$user cannot use /dev/kvm; add the user to the group $(stat -c %G -- "$root/dev/kvm"), then log in again"
+  fi
+  if [ "$gpu" != lavapipe ]; then
+    if [ "$gpu_device" = auto ]; then
+      for node in "$root"/dev/dri/renderD*; do
+        if [ -e "$node" ]; then
+          render=${node#"$root"}
+          break
+        fi
+      done
+    elif [ -e "$root$gpu_device" ]; then
+      render=$gpu_device
+    else
+      die "APPLIANCE_GPU_DEVICE $gpu_device does not exist"
+    fi
+    if [ -z "$render" ] && [ "$gpu" = host ]; then
+      die "APPLIANCE_GPU=host needs a render node, and /dev/dri has none"
+    fi
+    if [ -n "$render" ] && { [ ! -r "$root$render" ] || [ ! -w "$root$render" ]; }; then
+      local group
+      group=$(stat -c %G -- "$root$render")
+      [ "$gpu" != host ] || die "$user cannot use $render; add the user to the group $group, then log in again"
+      warn "$user cannot use $render, so Android renders in software; add the user to the group $group for the GPU"
+      render=
+    fi
+  fi
+  for node in /dev/kvm $render; do
+    [ -e "$root$node" ] || continue
+    mode=$(stat -c %a -- "$root$node")
+    if [ $((8#$mode & 6)) != 6 ]; then group_add=1; fi
+  done
+}
+
+# rotational DIR: succeed when DIR is on a rotational disk.
+rotational() {
+  local source dev
+  source=$(df -P -- "$1" 2>/dev/null | awk 'NR == 2 { print $1 }')
+  case $source in /dev/*) ;; *) return 1 ;; esac
+  dev=$root/sys/class/block/$(basename "$(readlink -f -- "$source")")
+  # A partition reports through its disk.
+  if [ -e "$dev/partition" ]; then dev=$dev/..; fi
+  [ "$(cat "$dev/queue/rotational" 2>/dev/null)" = 1 ]
+}
+
+# The image state file keeps the current and the previous image of this
+# instance, and whether install.sh built them (only those are removed).
+read_images() {
+  current_image='' current_built=0 previous_image='' previous_built=0
+  [ -f "$root$images_file" ] || return 0
+  local key value
+  while IFS='=' read -r key value; do
+    case $key in
+      CURRENT_IMAGE) current_image=$value ;;
+      CURRENT_BUILT) current_built=$value ;;
+      PREVIOUS_IMAGE) previous_image=$value ;;
+      PREVIOUS_BUILT) previous_built=$value ;;
+    esac
+  done <"$root$images_file"
+}
+
+write_images() {
+  mkdir -p "$root$config_dir"
+  cat >"$root$images_file.tmp" <<EOF
+# Managed by install.sh: the images of $name. --rollback switches to
+# the previous image.
+CURRENT_IMAGE=$current_image
+CURRENT_BUILT=$current_built
+PREVIOUS_IMAGE=$previous_image
+PREVIOUS_BUILT=$previous_built
+EOF
+  mv "$root$images_file.tmp" "$root$images_file"
+}
+
+# The new image becomes current, the current one previous. The image
+# that drops out of the two goes to dropped_image when install.sh built
+# it.
+rotate_images() {
+  local new=$1 built=$2
+  dropped_image=
+  if [ "$new" = "$current_image" ]; then
+    current_built=$built
+    return
+  fi
+  if [ "$new" != "$previous_image" ] && [ -n "$previous_image" ] && [ "$previous_built" = 1 ]; then
+    dropped_image=$previous_image
+  fi
+  previous_image=$current_image
+  previous_built=$current_built
+  current_image=$new
+  current_built=$built
+}
+
+# Remove an image of this instance unless another unit runs it. Podman
+# refuses to remove an image that a container uses.
+remove_image() {
+  local image=$1 file
+  for file in "$root$quadlet_dir"/*.container; do
+    [ -f "$file" ] && [ "$file" != "$root$unit_file" ] || continue
+    if grep -qxF "Image=$image" "$file"; then
+      echo "install.sh: kept the image $image, which $file uses"
+      return
+    fi
+  done
+  echo "install.sh: removing the image $image"
+  if [ -z "$root" ] && ! podman rmi "$image" >/dev/null 2>&1; then
+    echo "install.sh: could not remove the image $image; a container may still use it" >&2
+  fi
+}
+
+build_image() {
+  [ -f "$here/Containerfile" ] || die "$here/Containerfile is missing"
+  local args=(--build-arg "API_LEVEL=$api" --build-arg "VERSION=$version") key variable
+  for key in EMULATOR_VERSION PLATFORM_TOOLS_VERSION IMAGE_REVISION REPOSITORY; do
+    variable=APPLIANCE_SDK_$key
+    if [ -n "${!variable:-}" ]; then args+=(--build-arg "SDK_$key=${!variable}"); fi
+  done
+  old_image_id=$(podman image inspect --format '{{.Id}}' "$image" 2>/dev/null || true)
+  echo "install.sh: building the image $image; the first build downloads about 2.5 GB of SDK"
+  podman build --tag "$image" --file "$here/Containerfile" "${args[@]}" "$here" ||
+    die "the image build failed"
+}
+
+# The daemon answers on its unix socket, which androidctl uses.
+health_cmd="/opt/appliance/venv/bin/python -m appliance healthcheck"
+
+write_unit() {
+  cat <<EOF
+# Managed by install.sh. Edit $config_file and run install.sh again.
+[Unit]
+Description=Android appliance ($name)
+
+[Container]
+ContainerName=$name
+Image=$image
+Pull=never
+UserNS=keep-id
+DropCapability=all
+NoNewPrivileges=true
+ReadOnly=true
+Tmpfs=/tmp:rw,size=512m
+Ulimit=core=0
+RunInit=true
+Timezone=local
+AddDevice=/dev/kvm
+EOF
+  if [ -n "$render" ]; then echo "AddDevice=$render"; fi
+  if [ "$group_add" = 1 ]; then echo "GroupAdd=keep-groups"; fi
+  cat <<EOF
+Volume=$state_dir:/data:Z,nosuid,nodev
+Volume=%t/$name:/run/appliance:Z
+PublishPort=$publish_address:$port:8080/tcp
+PublishPort=$publish_address:$turn_port:3478/udp
+PublishPort=$publish_address:$turn_port:3478/tcp
+EnvironmentFile=$config_file
+Environment=APPLIANCE_LISTEN_ADDRESS=$listen APPLIANCE_PORT=$port APPLIANCE_TURN_PORT=$turn_port APPLIANCE_GPU=$gpu
+StopTimeout=150
+HealthCmd=$health_cmd
+
+[Service]
+Environment=CONTAINERS_CONF_OVERRIDE=$override_file
+ExecStartPre=/usr/bin/install -d -m 0700 %t/$name
+Restart=on-failure
+TimeoutStartSec=300
+TimeoutStopSec=180
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+quote() {
+  case $1 in
+    '' | *[!A-Za-z0-9_./:=@%+,-]*) printf "'%s'" "${1//\'/\'\\\'\'}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# The podman run command of the unit, for hosts without systemd.
+print_run() {
+  local options=(
+    "--name $(quote "$name") --replace --pull=never --restart=on-failure"
+    "--userns=keep-id --cap-drop=ALL --security-opt no-new-privileges"
+    "--read-only --tmpfs /tmp:rw,size=512m --ulimit core=0 --init --tz=local"
+    "--device /dev/kvm"
+  )
+  if [ -n "$render" ]; then options+=("--device $(quote "$render")"); fi
+  if [ "$group_add" = 1 ]; then options+=("--group-add keep-groups"); fi
+  options+=(
+    "-v $(quote "$state_dir:/data:Z,nosuid,nodev") -v $(quote "$runtime_dir:/run/appliance:Z")"
+    "-p $(quote "$publish_address:$port:8080/tcp")"
+    "-p $(quote "$publish_address:$turn_port:3478/udp") -p $(quote "$publish_address:$turn_port:3478/tcp")"
+    "--env-file $(quote "$config_file")"
+    "--env APPLIANCE_LISTEN_ADDRESS=$(quote "$listen") --env APPLIANCE_PORT=$port"
+    "--env APPLIANCE_TURN_PORT=$turn_port --env APPLIANCE_GPU=$gpu"
+    "--stop-timeout 150 --health-cmd $(quote "$health_cmd")"
+  )
+  echo "# Run $name without systemd. Stop it with: podman stop -t 150 $name"
+  echo "install -d -m 0700 $(quote "$runtime_dir")"
+  echo "CONTAINERS_CONF_OVERRIDE=$(quote "$override_file") podman run -d \\"
+  local option
+  for option in "${options[@]}"; do
+    echo "  $option \\"
+  done
+  echo "  $(quote "$image")"
+}
+
+quadlet_generator() {
+  local file
+  for file in /usr/libexec/podman/quadlet /usr/lib/podman/quadlet; do
+    if [ -x "$file" ]; then
+      echo "$file"
+      return
+    fi
+  done
+  return 1
+}
+
+# Write the unit only after the Quadlet generator accepts it.
+install_unit() {
+  local work generator errors
+  if [ -f "$root$unit_file" ] && ! grep -q '^# Managed by install.sh' "$root$unit_file"; then
+    die "$unit_file exists, and install.sh did not write it; remove it or choose another APPLIANCE_NAME"
+  fi
+  work=$(mktemp -d)
+  write_unit >"$work/$name.container"
+  if generator=$(quadlet_generator); then
+    if ! errors=$(QUADLET_UNIT_DIRS=$work "$generator" -dryrun -user 2>&1 >/dev/null); then
+      rm -rf "$work"
+      die "the Quadlet generator rejected the unit:"$'\n'"$(grep -v 'Loading source unit file' <<<"$errors")"
+    fi
+  elif [ -z "$root" ]; then
+    rm -rf "$work"
+    die "the Quadlet generator of Podman is missing; install Podman 4.4 or later"
+  else
+    echo "install.sh: the Quadlet generator is missing; the staged unit is not validated" >&2
+  fi
+  mkdir -p "$root$quadlet_dir"
+  cp "$work/$name.container" "$root$unit_file.tmp"
+  mv "$root$unit_file.tmp" "$root$unit_file"
+  rm -rf "$work"
+}
+
+# ours_androidctl LINK: LINK points at bin/androidctl in a checkout of this
+# appliance. Any other link is somebody's wrapper or the v1 command.
+ours_androidctl() {
+  local target top
+  target=$(readlink -f -- "$1") || return 1
+  top=$(dirname "$(dirname "$target")")
+  [ "$(basename "$target")" = androidctl ] && [ "$(basename "$(dirname "$target")")" = bin ] &&
+    [ -f "$top/install.sh" ] && [ -f "$top/VERSION" ] && [ -f "$top/Containerfile" ]
+}
+
+link_androidctl() {
+  local link=$root$bin_dir/androidctl
+  mkdir -p "$root$bin_dir"
+  if { [ -e "$link" ] || [ -L "$link" ]; } && { [ ! -L "$link" ] || ! ours_androidctl "$link"; }; then
+    warn "kept $bin_dir/androidctl, which is not a link to the androidctl of this appliance; it may not control this instance"
+    return
+  fi
+  ln -sfn "$here/bin/androidctl" "$link"
+}
+
+# Wait for the daemon, so that androidctl works when install.sh returns.
+# A daemon that does not come up is a failed installation: the unit starts
+# even when the daemon exits at once (a bad value, an image that cannot run).
+wait_daemon() {
+  local wait=${APPLIANCE_INSTALL_WAIT:-60} hint=
+  local deadline=$((SECONDS + wait))
+  until curl -sf --max-time 5 -o /dev/null --unix-socket "$runtime_dir/api.sock" http://localhost/api/v1/health; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "install.sh: the daemon did not answer within ${wait}s. The last lines of the journal of $unit:" >&2
+      if command -v journalctl >/dev/null 2>&1; then journalctl --user -u "$unit" -n 20 --no-pager >&2 || true; fi
+      if [ -n "$previous_image" ]; then hint=" To go back to the previous image: install.sh --rollback"; fi
+      # The image that dropped out is not the way back; do not leave it behind untracked.
+      if [ -n "$dropped_image" ]; then remove_image "$dropped_image"; fi
+      die "$name did not start. Fix the cause and run install.sh again.$hint"
+    fi
+    sleep 1
+  done
+}
+
+# The daemon refuses an invalid value at its start. Ask the image first, so
+# that the unit is not restarted into a crash loop.
+check_config() {
+  [ -z "$root" ] || return 0
+  local errors
+  errors=$(podman run --rm --pull=never --env-file "$config_file" \
+    --env "APPLIANCE_LISTEN_ADDRESS=$listen" --env "APPLIANCE_PORT=$port" --env "APPLIANCE_TURN_PORT=$turn_port" \
+    --env "APPLIANCE_GPU=$gpu" "$image" /opt/appliance/venv/bin/python -m appliance check-config 2>&1) ||
+    die "the appliance in $image rejects $config_file:"$'\n'"$errors"
+}
+
+install_appliance() {
+  if [ ! -f "$root$config_file" ]; then
+    mkdir -p "$root$config_dir"
+    cp "$here/conf/appliance.conf.example" "$root$config_file"
+    chmod 0600 "$root$config_file"
+    echo "install.sh: created $config_file from the example; edit it and run install.sh again to customize"
+  fi
+  read_config
+  load_settings
+  dedicated_dir "$state_dir" "use a directory of its own, such as ~/.local/share/android-appliance" >/dev/null
+  check_state_dir
+  check_unit_owner
+  check_v1
+  detect_devices
+  read_images
+
+  local built=0 new_image_id=''
+  old_image_id=''
+  if [ "$action" = rollback ]; then
+    [ -n "$previous_image" ] || die "there is no previous image to roll back to ($images_file)"
+    image=$previous_image
+    built=$previous_built
+    if [ -z "$root" ] && ! podman image exists "$image"; then
+      die "the previous image $image does not exist any more"
+    fi
+  elif [ "$build" = 1 ]; then
+    if [ -z "$root" ]; then build_image; fi
+    built=1
+  else
+    if [ -z "$root" ] && ! podman image exists "$image"; then
+      die "the image $image does not exist; run install.sh without --no-build"
+    fi
+    if [ "$image" = "$current_image" ]; then built=$current_built; fi
+    if [ "$image" = "$previous_image" ]; then built=$previous_built; fi
+  fi
+  check_config
+  rotate_images "$image" "$built"
+
+  if [ ! -d "$root$state_dir" ]; then
+    mkdir -p "$(dirname "$root$state_dir")"
+    mkdir -m 0700 "$root$state_dir"
+  fi
+  [ -w "$root$state_dir" ] || die "$user cannot write the state directory $state_dir"
+  # The AVD holds the accounts of the device: the directory is private
+  # even when the user made it with another mode.
+  chmod 0700 "$root$state_dir" 2>/dev/null || warn "cannot make $state_dir private (mode 0700); other users of this host may read the Android data"
+  printf '%s\n' "$name" >"$root$state_dir/$state_marker"
+  install -d -m 0700 "$root$runtime_dir"
+  mkdir -p "$root$config_dir"
+  cat >"$root$override_file" <<EOF
+# Managed by install.sh. SELinux separation for the container $name,
+# also when a containers.conf of the host sets label = false.
+[containers]
+label = true
+EOF
+  link_androidctl
+
+  if [ "$action" = print-run ]; then
+    write_images
+    print_run
+  else
+    install_unit
+    write_images
+    if [ -z "$root" ]; then
+      systemctl --user daemon-reload
+      if [ "$(systemctl --user show -p LoadState --value "$unit")" != loaded ]; then
+        die "systemd did not load $unit; APPLIANCE_QUADLET_DIR must be a directory that the Quadlet generator reads, such as ~/.config/containers/systemd"
+      fi
+      if [ "$start" = 1 ]; then
+        echo "install.sh: (re)starting $unit"
+        systemctl --user restart "$unit" || die "$unit did not start; see: journalctl --user -u $unit"
+        wait_daemon
+      fi
+    fi
+    if [ ! -e "$root/var/lib/systemd/linger/$user" ]; then
+      warn "lingering is off, so the appliance stops at logout and does not start at boot; turn it on with: loginctl enable-linger $user"
+    fi
+  fi
+
+  # Remove old images after the restart, when no container uses them.
+  if [ -n "$dropped_image" ]; then remove_image "$dropped_image"; fi
+  # A rebuild under the same tag leaves the old image without a tag. An
+  # image that still has a tag (another version) stays.
+  if [ -z "$root" ] && [ "$built" = 1 ] && [ -n "$old_image_id" ]; then
+    new_image_id=$(podman image inspect --format '{{.Id}}' "$image" 2>/dev/null || true)
+    if [ "$new_image_id" != "$old_image_id" ] &&
+      [ "$(podman image inspect --format '{{len .RepoTags}}' "$old_image_id" 2>/dev/null)" = 0 ]; then
+      podman rmi "$old_image_id" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  if rotational "$root$state_dir"; then
+    warn "the state directory $state_dir is on a rotational disk; Android boots and runs much slower there. Set APPLIANCE_STATE_DIR to a directory on an SSD."
+  fi
+
+  echo "install.sh: installed the Android appliance $name"
+  echo "install.sh:   configuration: $config_file"
+  echo "install.sh:   state:         $state_dir"
+  echo "install.sh:   image:         $image"
+  if [ "$action" != print-run ]; then
+    echo "install.sh:   unit:          $unit_file ($unit)"
+  fi
+  echo "install.sh:   androidctl:    $bin_dir/androidctl"
+  echo "install.sh:   dashboard:     $(ANDROID_APPLIANCE_CONFIG=$root$config_file "$here/bin/androidctl" display) (androidctl dashboard prints a login link)"
+  if [ "$config_file" != "$config_home/android-appliance/appliance.conf" ]; then
+    echo "install.sh: this instance has its own configuration; run androidctl with ANDROID_APPLIANCE_CONFIG=$config_file"
+  fi
+  print_warnings
+  if [ -n "$root" ]; then
+    echo "install.sh: staged the appliance under $root"
+  elif [ "$action" != print-run ]; then
+    echo "install.sh: start Android with: androidctl start"
+  fi
+}
+
+print_warnings() {
+  local warning
+  for warning in "${warnings[@]}"; do
+    echo "install.sh: WARNING $warning" >&2
+  done
+}
+
+# dedicated_dir DIR ADVICE: print DIR with its links resolved, or refuse
+# a shared directory. The container relabels the state directory for
+# SELinux, and --purge deletes it.
+dedicated_dir() {
+  local dir=$1 resolved shared refused=0
+  resolved=$(realpath -m -- "$root$dir")
+  if [ -n "$root" ]; then
+    case $resolved in
+      "$root") resolved=/ ;;
+      "$root"/*) resolved=${resolved#"$root"} ;;
+      *) die "APPLIANCE_STATE_DIR '$dir' is outside the staging root" ;;
+    esac
+  fi
+  case $resolved in
+    /home/*/*) ;;
+    /home/*) refused=1 ;;
+    /*/*) ;;
+    # / and every top-level directory: /var, /home, /srv, /opt, /etc,
+    # /usr, /tmp, /root, /run, ...
+    *) refused=1 ;;
+  esac
+  # Compare the files themselves: HOME or a data directory may be reached
+  # through a link or a bind mount.
+  for shared in /var/lib /var/tmp /var/home /usr/local /run/user \
+    "$HOME" "$HOME/.local" "$data_home" "$config_home" "$runtime_base"; do
+    if [ "$resolved" = "$(realpath -m -s -- "$shared")" ] || [ "$root$resolved" -ef "$root$shared" ]; then refused=1; fi
+  done
+  if [ "$refused" = 1 ]; then
+    die "APPLIANCE_STATE_DIR '$dir' is not a dedicated directory; $2"
+  fi
+  # The directory must not hold what install.sh and androidctl keep elsewhere.
+  case "$here/" in
+    "$resolved"/*) die "APPLIANCE_STATE_DIR '$dir' contains this installer; $2" ;;
+  esac
+  for shared in "$HOME" "$data_home" "$config_home" "$runtime_base" "$config_dir" "$quadlet_dir" "$bin_dir" "$runtime_dir"; do
+    case "$(realpath -m -- "$root$shared")/" in
+      "$root$resolved"/*) die "APPLIANCE_STATE_DIR '$dir' contains $shared; $2" ;;
+    esac
+  done
+  if [ -e "$root$resolved" ] && [ ! -O "$root$resolved" ]; then
+    die "APPLIANCE_STATE_DIR '$dir' is not owned by $user; $2"
+  fi
+  echo "$resolved"
+}
+
+uninstall() {
+  # Without the file the defaults would name the default instance, which a
+  # mistyped --config must not remove.
+  [ -f "$root$config_file" ] ||
+    die "the configuration file $config_file does not exist, so install.sh cannot tell which appliance to remove; give the --config of the instance"
+  read_config
+  load_settings
+  read_images
+  local target='' container_image owner
+  # Everything that is not this instance's is refused before anything is
+  # stopped or deleted.
+  if [ -f "$root$unit_file" ]; then
+    grep -q '^# Managed by install.sh' "$root$unit_file" ||
+      die "$unit_file exists, and install.sh did not write it; nothing was removed"
+    check_unit_owner
+  fi
+  if [ "$purge" = 1 ]; then
+    target=$(dedicated_dir "$state_dir" "delete it yourself")
+    if [ -e "$root$v1_unit" ] &&
+      overlaps "$target" "$(realpath -m -s -- "$(v1_setting APPLIANCE_STATE_DIR /var/lib/android-appliance)")"; then
+      die "APPLIANCE_STATE_DIR '$state_dir' holds the state of the v1 appliance; delete it yourself"
+    fi
+    owner=$(state_owner "$target")
+    if [ -n "$owner" ] && [ "$owner" != "$name" ]; then
+      die "the state directory $state_dir belongs to the appliance '$owner'; delete it yourself"
+    fi
+    if [ -z "$owner" ] && ! unused_dir "$target" && ! looks_like_state "$target"; then
+      die "the state directory $state_dir is not empty and holds no appliance state; delete it yourself"
+    fi
+  fi
+
+  if [ -z "$root" ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl --user stop "$unit" 2>/dev/null || true
+  fi
+  rm -f "$root$unit_file"
+  if [ -z "$root" ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl --user daemon-reload
+    systemctl --user reset-failed "$unit" 2>/dev/null || true
+  fi
+  # A container from the --print-run command runs without the unit.
+  if [ -z "$root" ] && command -v podman >/dev/null 2>&1 && podman container exists "$name"; then
+    container_image=$(podman container inspect --format '{{.ImageName}}' "$name")
+    if [ -n "$container_image" ] && { [ "$container_image" = "$current_image" ] || [ "$container_image" = "$previous_image" ]; }; then
+      podman stop -t 150 "$name" >/dev/null
+      podman rm -f "$name" >/dev/null
+    fi
+  fi
+  if [ -n "$current_image" ] && [ "$current_built" = 1 ]; then remove_image "$current_image"; fi
+  if [ -n "$previous_image" ] && [ "$previous_built" = 1 ]; then remove_image "$previous_image"; fi
+  rm -f "$root$override_file" "$root$images_file"
+  rm -rf "${root}${runtime_dir:?}"
+  local link=$root$bin_dir/androidctl
+  if [ -L "$link" ] && ours_androidctl "$link"; then rm -f "$link"; fi
+  echo "install.sh: removed the Android appliance $name"
+
+  if [ "$purge" = 1 ]; then
+    if ! rm -rf -- "${root}${target:?}" 2>/dev/null; then
+      # Files that another container user created belong to a
+      # subordinate uid of this user.
+      if [ -n "$root" ] || ! podman unshare rm -rf -- "$target"; then die "could not delete $target"; fi
+    fi
+    rm -f "$root$config_file"
+    rmdir "$root$config_dir" 2>/dev/null || true
+    echo "install.sh: deleted the state directory $target and the configuration $config_file"
+  else
+    # Another appliance may adopt the directory now.
+    if [ "$(state_owner "$state_dir")" = "$name" ]; then rm -f "$root$state_dir/$state_marker"; fi
+    echo "install.sh: kept the state directory $state_dir and the configuration $config_file"
+    echo "install.sh: --uninstall --purge deletes them, with all apps and data of Android"
+  fi
+}
+
+case $action in
+  install | rollback | print-run) install_appliance ;;
+  uninstall) uninstall ;;
+esac

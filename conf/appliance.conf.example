@@ -1,60 +1,99 @@
 # Configuration of the Android appliance.
 #
-# install.sh copies this file to /etc/android-appliance/appliance.conf.
-# Syntax: KEY=value, one key per line, no spaces and no quotes. A value
-# that is already in the environment keeps the environment value. Edit
-# the file, then run install.sh again to apply a change.
+# install.sh copies this file to ~/.config/android-appliance/appliance.conf
+# (or to the file of install.sh --config FILE). Syntax: KEY=value, one
+# APPLIANCE_* key per line, no spaces and no quotes; ~ and $VARIABLES
+# are not expanded. A value that is already in the environment of
+# install.sh or androidctl keeps the environment value. The container
+# reads this file as its environment when it starts. Edit the file, then
+# run install.sh again to apply a change.
 
-# Persistent appliance directory. It holds the AVD, userdata and adb keys.
-APPLIANCE_STATE_DIR=/var/lib/android-appliance
+# Name of the container, of its user unit (<name>.service) and of its
+# socket directory ($XDG_RUNTIME_DIR/<name>). Another configuration file
+# gives a second, independent instance, if it has another name, another
+# state directory and other ports. install.sh refuses a name that
+# belongs to another configuration, and a state directory of another
+# instance.
+APPLIANCE_NAME=android-appliance
 
-# User and group that run the emulator and operate it.
-APPLIANCE_USER=android-appliance
-APPLIANCE_GROUP=android-appliance
+# Persistent appliance directory. It holds the AVD, userdata, adb keys
+# and the API token. The default is ~/.local/share/android-appliance.
+# It must be a directory of its own: new or empty, or the state of one
+# appliance (install.sh refuses other content, because the container
+# relabels the directory and --uninstall --purge deletes it). It becomes
+# private (mode 0700). Prefer an SSD: Android boots and runs much slower
+# on a rotational disk.
+#APPLIANCE_STATE_DIR=/home/me/.local/share/android-appliance
+
+# The host publishes two ports on this address. The HTTP port serves
+# the dashboard, the API and MCP. The browser also needs the TURN port
+# (UDP and TCP) for the video. 127.0.0.1 keeps both on this machine.
+# Any other address publishes the API as plain HTTP on the network: put
+# a reverse proxy with TLS in front of it, and set APPLIANCE_TRUST_PROXY.
+APPLIANCE_LISTEN_ADDRESS=127.0.0.1
+APPLIANCE_PORT=6090
+APPLIANCE_TURN_PORT=3478
+
+# Host name in the TURN URLs that the dashboard gets. Empty: the host
+# name of the dashboard page.
+APPLIANCE_TURN_HOST=
+
+# 1: trust X-Forwarded-Proto, X-Forwarded-Host and X-Forwarded-For from
+# a reverse proxy in front of the port. The proxy must add the address of
+# its client to X-Forwarded-For; the daemon uses the last entry.
+APPLIANCE_TRUST_PROXY=0
+
+# The largest file that a push or an APK install accepts, in MiB. The
+# upload also keeps 1 GiB of the state disk free for the AVD.
+APPLIANCE_MAX_UPLOAD_MIB=4096
 
 # Name of the AVD in the state directory.
 APPLIANCE_AVD_NAME=android
 
-# Android API level of the system image. The Google APIs Play Store
-# image must exist for this level and x86_64.
+# Android API level of the system image. install.sh builds the image
+# with it; conf/sdk.lock must pin the Google APIs Play Store image of
+# this level for x86_64.
 APPLIANCE_API_LEVEL=36
 
-# Stop Android after this many minutes without use. The next use cold
-# boots with the existing userdata.
+# Rendering. auto uses the GPU when its render node works, and lavapipe
+# (software, slower) otherwise. host requires the GPU. lavapipe never
+# uses it.
+APPLIANCE_GPU=auto
+
+# Render node for GPU rendering. auto is the first /dev/dri/renderD*.
+APPLIANCE_GPU_DEVICE=auto
+
+# Stop Android after this many minutes without use; 0 disables it. The
+# next use cold boots with the existing userdata.
 APPLIANCE_IDLE_STOP_MINUTES=60
 
-# Guest hardware. A change preserves userdata but forces a cold boot.
+# Guest hardware. A change keeps userdata and applies at the next boot.
 APPLIANCE_MEMORY_MIB=4096
 APPLIANCE_CORES=4
+
+# Userdata size of a new AVD.
 APPLIANCE_DISK_SIZE=32G
 
-# Emulator -gpu mode. swiftshader works on every headless host; host
-# needs a usable GPU and EGL. Snapshot load/save is always disabled.
-APPLIANCE_GPU=swiftshader
+# Seconds before a boot fails.
+APPLIANCE_BOOT_TIMEOUT=900
 
-# Browser display through scrcpy and noVNC. 1 serves the device screen
-# at the loopback port below; 0 disables it.
-APPLIANCE_DISPLAY_ENABLED=1
-APPLIANCE_DISPLAY_PORT=6090
-
-# Android SDK directory. install.sh installs the pinned SDK here with
-# scripts/provision-sdk.sh.
-APPLIANCE_ANDROID_HOME=/opt/android-sdk
-
-# 1: install.sh installs the pinned SDK packages. 0: you manage the SDK,
-# and install.sh only checks it.
-APPLIANCE_SDK_MANAGED=1
-
-# Revisions of the SDK packages. conf/sdk.lock pins the archive and the
-# SHA-256 of each revision. An unset key selects the default revision
-# of the lock (for the system image: the default for
+# Revisions of the SDK packages in the image. conf/sdk.lock pins the
+# archive and the SHA-256 of each revision. An unset key selects the
+# default revision of the lock (for the system image: the default for
 # APPLIANCE_API_LEVEL). Set a key to keep a revision when a new project
-# version changes the default. The command-line tools (sdkmanager) are
-# not necessary; set their key to install them. They need Java.
+# version changes the default.
 #APPLIANCE_SDK_EMULATOR_VERSION=37.2.12
 #APPLIANCE_SDK_PLATFORM_TOOLS_VERSION=37.0.1
 #APPLIANCE_SDK_IMAGE_REVISION=7
-#APPLIANCE_SDK_CMDLINE_TOOLS_VERSION=23.0
 
 # Download location of the SDK archives, for example a local mirror.
 #APPLIANCE_SDK_REPOSITORY=https://dl.google.com/android/repository
+
+# Where install.sh links androidctl and writes the Quadlet unit. The
+# defaults are ~/.local/bin and ~/.config/containers/systemd.
+#APPLIANCE_BIN_DIR=/home/me/.local/bin
+#APPLIANCE_QUADLET_DIR=/home/me/.config/containers/systemd
+
+# Image to build and run. The default is
+# localhost/android-appliance:<version>-api<APPLIANCE_API_LEVEL>.
+#APPLIANCE_IMAGE=localhost/android-appliance:2.0.0-api36

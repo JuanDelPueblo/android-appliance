@@ -31,7 +31,7 @@ if [ -f "$config_file" ]; then
 fi
 
 # The APPLIANCE_* keys come from the configuration file or the
-# environment; their defaults match conf/appliance.conf.example.
+# environment; their defaults match legacy/appliance.conf.example.
 ANDROID_APPLIANCE_STATE_DIR=${ANDROID_APPLIANCE_STATE_DIR:-${APPLIANCE_STATE_DIR:-/var/lib/android-appliance}}
 ANDROID_APPLIANCE_USER=${ANDROID_APPLIANCE_USER:-${APPLIANCE_USER:-}}
 ANDROID_APPLIANCE_UNIT=${ANDROID_APPLIANCE_UNIT:-android-appliance-emulator.service}

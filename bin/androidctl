@@ -1,0 +1,802 @@
+#!/usr/bin/env bash
+# androidctl: lifecycle control and automation for the Android appliance.
+#
+# The appliance daemon in the container owns the emulator. This script
+# only sends requests to its HTTP API with curl, over the unix socket
+# $XDG_RUNTIME_DIR/<APPLIANCE_NAME>/api.sock (inside the container:
+# /run/appliance/api.sock), or over TCP with ANDROID_APPLIANCE_URL and
+# ANDROID_APPLIANCE_TOKEN. The host needs only bash and curl.
+#
+# Configuration comes from the environment, then from
+# ANDROID_APPLIANCE_CONFIG (default
+# ${XDG_CONFIG_HOME:-~/.config}/android-appliance/appliance.conf), then
+# from the built-in defaults.
+set -euo pipefail
+
+self=$(readlink -f "${BASH_SOURCE[0]}")
+here=$(dirname "$self")
+
+config_file=${ANDROID_APPLIANCE_CONFIG:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/android-appliance/appliance.conf}
+
+# Fill unset APPLIANCE_* variables from the configuration file. The
+# format is strict: one key per line, no spaces and no quotes.
+if [ -f "$config_file" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+      APPLIANCE_*=*)
+        key=${line%%=*}
+        case $key in *[!A-Za-z0-9_]*) continue ;; esac
+        if [ -z "${!key:-}" ]; then
+          printf -v "$key" '%s' "${line#*=}"
+        fi
+        ;;
+    esac
+  done <"$config_file"
+fi
+
+name=${APPLIANCE_NAME:-android-appliance}
+unit=$name.service
+boot_timeout=${APPLIANCE_BOOT_TIMEOUT:-900}
+case $boot_timeout in '' | *[!0-9]*) boot_timeout=900 ;; esac
+remote_url=${ANDROID_APPLIANCE_URL:-}
+in_container=0
+if [ -n "$remote_url" ]; then
+  where=$remote_url
+elif [ -n "${ANDROID_APPLIANCE_SOCKET:-}" ]; then
+  where=$ANDROID_APPLIANCE_SOCKET
+elif [ -S /run/appliance/api.sock ]; then
+  where=/run/appliance/api.sock
+  in_container=1
+else
+  where=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/$name/api.sock
+fi
+
+# Status requests answer at once; anything that may boot Android or run
+# a device command can take a whole boot plus the command itself.
+quick_timeout=60
+long_timeout=$((boot_timeout + 600))
+max_time=$long_timeout
+
+usage() {
+  cat <<'EOF'
+usage: androidctl <command> [args]
+
+Lifecycle:
+  status                        print state, boot readiness and idle time
+  start [--no-wait]             start Android and wait until usable
+  stop                          shut down Android and free its RAM
+  restart [--no-wait]           stop, then start again
+  wait                          block until the current boot completes
+  display                       print the local URL of the browser display
+  dashboard                     print a one-time login link for the dashboard
+
+Automation (these start Android when necessary):
+  screenshot [file]             save the screen as PNG and print the path
+  ui                            print the UI hierarchy as XML
+  tap <x> <y>                   tap a screen coordinate
+  long-press <x> <y> [ms]       touch and hold a screen coordinate
+  swipe <x1> <y1> <x2> <y2> [ms]
+  text <string>                 type text into the focused field
+  key <keyevent>                send a key event, for example HOME or 66
+  shell <command...>            run a shell command on the device
+  install <apk> [-r|-g|-d|-t...] install an APK (replace, grant, downgrade, test)
+  uninstall <package> [-k]      remove an app; -k keeps its data
+  apps [--all]                  list the installed apps; --all adds system apps
+  launch <package>              start an app
+  force-stop <package>          stop an app
+  push <local> <remote>         copy a file to the device (a device directory
+                                takes the file under its name)
+  pull <remote> <local>         copy a file from the device
+  ls <remote>                   list a device directory
+
+Files are copied one at a time; directories are not copied. The shell
+command does not read standard input: use push for data.
+
+Appliance:
+  logs [emulator|daemon] [-n N] print the last log lines
+  token [--rotate]              print the API token, or replace it
+  doctor                        check the host and the appliance
+  version                       print the versions
+EOF
+}
+
+die() {
+  echo "androidctl: $*" >&2
+  exit 1
+}
+
+usage_error() {
+  [ "$#" = 0 ] || echo "androidctl: $*" >&2
+  usage >&2
+  exit 2
+}
+
+need() {
+  local n=$1
+  shift
+  [ "$#" -ge "$n" ] || usage_error
+}
+
+tmp=$(mktemp -d)
+partial=
+cleanup() {
+  rm -rf "$tmp"
+  if [ -n "$partial" ]; then rm -f "$partial"; fi
+}
+trap cleanup EXIT
+
+curl_args=(-sS -H 'Accept: text/plain' -H 'Expect:' --connect-timeout 10)
+if [ -n "$remote_url" ]; then
+  base_url=${remote_url%/}/api/v1
+  if [ -n "${ANDROID_APPLIANCE_TOKEN:-}" ]; then
+    # A header file keeps the token out of the process list.
+    printf 'Authorization: Bearer %s\n' "$ANDROID_APPLIANCE_TOKEN" >"$tmp/auth"
+    curl_args+=(-H "@$tmp/auth")
+  fi
+else
+  base_url=http://localhost/api/v1
+  curl_args+=(--unix-socket "$where")
+fi
+
+# request METHOD PATH OUT [CURL_ARGS...]: print the HTTP status code.
+request() {
+  local method=$1 path=$2 out=$3
+  shift 3
+  local args=("${curl_args[@]}" --max-time "$max_time" -o "$out" -D "$tmp/headers" -w '%{http_code}')
+  if [ "$method" != GET ]; then args+=(-X "$method"); fi
+  curl "${args[@]}" "$@" "$base_url$path" 2>"$tmp/curl.err"
+}
+
+api_answers() {
+  curl "${curl_args[@]}" --max-time 5 -o /dev/null -f "$base_url/health" 2>/dev/null
+}
+
+# The socket is missing or refuses connections: start the user unit of
+# the container when there is one, and wait for the daemon.
+recover() {
+  [ -z "$remote_url" ] && [ "$in_container" = 0 ] || return 1
+  if ! command -v systemctl >/dev/null 2>&1 ||
+    [ "$(systemctl --user show -p LoadState --value "$unit" 2>/dev/null)" != loaded ]; then
+    die "the appliance is not running: nothing answers at $where, and there is no user unit $unit. Install it with install.sh, or start its container."
+  fi
+  if ! systemctl --user is-active --quiet "$unit"; then
+    echo "androidctl: starting $unit" >&2
+    systemctl --user start "$unit" || die "$unit did not start; see: journalctl --user -u $unit"
+  fi
+  local deadline=$((SECONDS + 60))
+  until api_answers; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      die "the appliance does not answer at $where after 60s; see: journalctl --user -u $unit"
+    fi
+    sleep 1
+  done
+}
+
+# call METHOD PATH OUT [CURL_ARGS...]: send one API request and write
+# the body to OUT. An HTTP error prints the message of the appliance.
+call() {
+  local method=$1 path=$2 out=$3 rc=0 code message
+  code=$(request "$@") || rc=$?
+  # A refused connection means the request was not sent, so a retry is
+  # safe even for input commands.
+  if [ "$rc" = 7 ] && recover; then
+    rc=0
+    code=$(request "$@") || rc=$?
+  fi
+  case $rc in
+    0) ;;
+    7) die "the appliance does not answer at $where" ;;
+    28) die "the appliance did not answer within ${max_time}s ($method $path)" ;;
+    *) die "the request to $where failed: $(sed 's/^curl: ([0-9]*) //' "$tmp/curl.err")" ;;
+  esac
+  case $code in
+    2??) return 0 ;;
+  esac
+  message=$(head -c 4096 "$out" 2>/dev/null || true)
+  die "${message:-the appliance answered HTTP $code}"
+}
+
+header() {
+  sed -n "s/^$1:[[:space:]]*//Ip" "$tmp/headers" | tr -d '\r' | tail -n 1
+}
+
+# Print a text body with a final newline.
+print_text() {
+  cat "$1"
+  if [ -s "$1" ] && [ -n "$(tail -c 1 "$1")" ]; then echo; fi
+}
+
+# json_field KEY FILE: print the string KEY of a flat JSON object. The
+# few JSON answers without a text format need nothing more.
+json_field() {
+  local json value out='' chunk hex re
+  json=$(<"$2")
+  re='"'"$1"'"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)"'
+  [[ $json =~ $re ]] || return 1
+  value=${BASH_REMATCH[1]}
+  while [ -n "$value" ]; do
+    chunk=${value%%\\*}
+    out+=$chunk
+    value=${value:${#chunk}}
+    [ -n "$value" ] || break
+    case ${value:1:1} in
+      n) out+=$'\n' ;;
+      t) out+=$'\t' ;;
+      r) out+=$'\r' ;;
+      b) out+=$'\b' ;;
+      f) out+=$'\f' ;;
+      u)
+        hex=${value:2:4}
+        # shellcheck disable=SC2059  # the format is the \u escape itself
+        printf -v chunk "\\u$hex"
+        out+=$chunk
+        value=${value:4}
+        ;;
+      *) out+=${value:1:1} ;;
+    esac
+    value=${value:2}
+  done
+  printf '%s' "$out"
+}
+
+urlencode() {
+  local LC_ALL=C s=$1 out='' c i
+  for ((i = 0; i < ${#s}; i++)); do
+    c=${s:i:1}
+    case $c in
+      [A-Za-z0-9._~/-]) out+=$c ;;
+      *)
+        printf -v c '%%%02X' "'$c"
+        out+=$c
+        ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# Coordinates and durations become JSON numbers, so check them first.
+# $((10#N)) then drops leading zeros, which JSON does not allow.
+integers() {
+  local value
+  for value in "$@"; do
+    case $value in
+      '' | *[!0-9]*) usage_error "'$value' is not a non-negative integer" ;;
+    esac
+    [ "${#value}" -le 9 ] || usage_error "'$value' is too large"
+  done
+}
+
+package_name() {
+  case $1 in
+    '' | *[!A-Za-z0-9._]*) usage_error "'$1' is not a package name" ;;
+  esac
+}
+
+post_json() {
+  call POST "$1" "$tmp/body" -H 'Content-Type: application/json' --data-binary "$2"
+}
+
+post_text() {
+  printf '%s' "$2" >"$tmp/request"
+  call POST "$1" "$tmp/body" -H 'Content-Type: text/plain; charset=utf-8' --data-binary "@$tmp/request"
+}
+
+cmd_status() {
+  max_time=$quick_timeout
+  call GET "/status?format=text" "$tmp/body"
+  print_text "$tmp/body"
+}
+
+# start, restart and stop print nothing, like v1. The request waits on
+# the daemon, so Ctrl-C stops only the wait.
+lifecycle() {
+  local action=$1 wait=true
+  case ${2:-} in
+    '') ;;
+    --no-wait)
+      wait=false
+      max_time=$quick_timeout
+      ;;
+    *) usage_error "unknown option '$2'" ;;
+  esac
+  [ "$#" -le 2 ] || usage_error
+  post_json "/$action?format=text" "{\"wait\":$wait}"
+}
+
+# Without the daemon there is no emulator: stop has nothing to do, and
+# wait nothing to wait for. A socket file can outlive its daemon.
+cmd_stop() {
+  [ "$#" = 0 ] || usage_error
+  if [ -z "$remote_url" ] && ! api_answers; then return 0; fi
+  post_json "/stop?format=text" '{"wait":true}'
+}
+
+cmd_wait() {
+  [ "$#" = 0 ] || usage_error
+  if [ -z "$remote_url" ] && ! api_answers; then die "android is stopped"; fi
+  post_json "/wait?format=text" '{}'
+}
+
+listen_url() {
+  if [ -n "$remote_url" ]; then
+    echo "${remote_url%/}/"
+    return
+  fi
+  local address=${APPLIANCE_LISTEN_ADDRESS:-127.0.0.1}
+  case $address in
+    0.0.0.0) address=127.0.0.1 ;;
+    ::) address="[::1]" ;;
+    *:*) address="[$address]" ;;
+  esac
+  echo "http://$address:${APPLIANCE_PORT:-6090}/"
+}
+
+# Screenshots go to the state directory, like in v1, when this user can
+# write it; otherwise to the user's data directory.
+screenshot_dir() {
+  local state=${APPLIANCE_STATE_DIR:-${XDG_DATA_HOME:-${HOME:-}/.local/share}/android-appliance}
+  if [ "$in_container" = 1 ]; then state=/data; fi
+  if [ -d "$state" ] && [ -w "$state" ]; then
+    echo "$state/screenshots"
+  else
+    echo "${XDG_DATA_HOME:-${HOME:-}/.local/share}/android-appliance/screenshots"
+  fi
+}
+
+# Write a download next to its target and move it into place, so that a
+# failed transfer keeps the previous file.
+download() {
+  local path=$1 target=$2
+  mkdir -p "$(dirname "$target")"
+  partial=$(mktemp "$(dirname "$target")/.androidctl.XXXXXX") || die "cannot write to $(dirname "$target")"
+  call GET "$path" "$partial"
+  [ -s "$partial" ] || [ "${3:-}" = allow-empty ] || die "the appliance sent an empty file"
+  mv "$partial" "$target"
+  partial=
+}
+
+cmd_screenshot() {
+  [ "$#" -le 1 ] || usage_error
+  local out=${1:-$(screenshot_dir)/$(date +%Y%m%d-%H%M%S-%N).png}
+  download "/screenshot?format=png" "$out"
+  echo "$out"
+}
+
+cmd_ui() {
+  [ "$#" = 0 ] || usage_error
+  call GET "/ui?format=xml" "$tmp/body"
+  print_text "$tmp/body"
+}
+
+cmd_tap() {
+  [ "$#" = 2 ] || usage_error
+  integers "$@"
+  post_json /input/tap "{\"x\":$((10#$1)),\"y\":$((10#$2))}"
+}
+
+cmd_long_press() {
+  [ "$#" = 2 ] || [ "$#" = 3 ] || usage_error
+  integers "$@"
+  local body="\"x\":$((10#$1)),\"y\":$((10#$2))"
+  if [ "$#" = 3 ]; then body+=",\"duration_ms\":$((10#$3))"; fi
+  post_json /input/long-press "{$body}"
+}
+
+cmd_swipe() {
+  [ "$#" = 4 ] || [ "$#" = 5 ] || usage_error
+  integers "$@"
+  local body="\"x1\":$((10#$1)),\"y1\":$((10#$2)),\"x2\":$((10#$3)),\"y2\":$((10#$4))"
+  if [ "$#" = 5 ]; then body+=",\"duration_ms\":$((10#$5))"; fi
+  post_json /input/swipe "{$body}"
+}
+
+cmd_key() {
+  [ "$#" = 1 ] || usage_error
+  case $1 in
+    '' | *[!A-Za-z0-9_]*) usage_error "'$1' is not a key name or number" ;;
+  esac
+  post_json /input/key "{\"key\":\"$1\"}"
+}
+
+# stdin_has_data: standard input is a non-empty file, or a pipe that
+# delivers data right away. A pipe that stays silent (a program that leaves
+# its stdin open) is not input.
+stdin_has_data() {
+  local rc=0
+  if [ -f /dev/stdin ]; then
+    [ -s /dev/stdin ]
+    return
+  fi
+  { [ -p /dev/stdin ] || [ -S /dev/stdin ]; } || return 1
+  IFS= read -r -N 1 -t 0.3 _ || rc=$?
+  [ "$rc" = 0 ]
+}
+
+# Like adb shell: the arguments form one command line, stdout and stderr
+# stay apart, and the exit status is the status of the device command. The
+# API runs the command without standard input, which adb shell of v1 would
+# have passed on: refuse instead of dropping the data.
+cmd_shell() {
+  local status
+  if stdin_has_data; then
+    echo "androidctl: shell does not pass standard input to the device; copy the data with push" >&2
+    exit 2
+  fi
+  post_text "/shell?format=raw" "$*"
+  status=$(header X-Exit-Code)
+  cat "$tmp/body"
+  header X-Stderr | base64 -d >"$tmp/stderr" 2>/dev/null || true
+  if [ "$(header X-Stderr-Truncated)" = 1 ]; then
+    print_text "$tmp/stderr" >&2
+    echo "androidctl: the appliance truncated stderr" >&2
+  else
+    cat "$tmp/stderr" >&2
+  fi
+  case $status in
+    '' | *[!0-9]*) die "the appliance did not report an exit status" ;;
+  esac
+  exit "$((status > 255 ? 255 : status))"
+}
+
+cmd_install() {
+  need 1 "$@"
+  local apk=$1 query='' flag
+  shift
+  for flag in "$@"; do
+    case $flag in
+      -r) query+='&replace=1' ;;
+      -g) query+='&grant=1' ;;
+      -d) query+='&downgrade=1' ;;
+      -t) query+='&test=1' ;;
+      *) usage_error "install supports -r, -g, -d and -t, not '$flag'" ;;
+    esac
+  done
+  [ -f "$apk" ] && [ -r "$apk" ] || die "cannot read $apk"
+  query=${query#&}
+  call POST "/apps/install${query:+?$query}" "$tmp/body" \
+    -H 'Content-Type: application/vnd.android.package-archive' -T "$apk"
+  print_output
+}
+
+print_output() {
+  local output
+  if output=$(json_field output "$tmp/body"); then
+    if [ -n "$output" ]; then printf '%s\n' "${output%$'\n'}"; fi
+  fi
+}
+
+cmd_uninstall() {
+  local pkg='' keep='' arg
+  for arg in "$@"; do
+    case $arg in
+      -k) keep='?keep_data=1' ;;
+      -*) usage_error "uninstall supports -k, not '$arg'" ;;
+      *)
+        [ -z "$pkg" ] || usage_error
+        pkg=$arg
+        ;;
+    esac
+  done
+  [ -n "$pkg" ] || usage_error
+  package_name "$pkg"
+  call DELETE "/apps/$pkg$keep" "$tmp/body"
+  print_output
+}
+
+cmd_apps() {
+  local all=''
+  case "$*" in
+    '') ;;
+    --all) all='&all=1' ;;
+    *) usage_error ;;
+  esac
+  call GET "/apps?format=text$all" "$tmp/body"
+  print_text "$tmp/body"
+}
+
+cmd_app_action() {
+  [ "$#" = 2 ] || usage_error
+  package_name "$2"
+  post_json "/apps/$2/$1" '{}'
+}
+
+cmd_push() {
+  [ "$#" = 2 ] || usage_error
+  local src=$1 dest=$2
+  [ -f "$src" ] && [ -r "$src" ] || die "cannot read $src; push copies one file"
+  case $dest in */) dest+=$(basename "$src") ;; esac
+  # The name matters when the destination is a device directory.
+  call PUT "/files?path=$(urlencode "$dest")&name=$(urlencode "$(basename "$src")")" "$tmp/body" \
+    -H 'Content-Type: application/octet-stream' -T "$src"
+}
+
+cmd_pull() {
+  [ "$#" = 2 ] || usage_error
+  local src=$1 dest=$2
+  if [ -d "$dest" ]; then dest=${dest%/}/$(basename "$src"); fi
+  download "/files?path=$(urlencode "$src")" "$dest" allow-empty
+  chmod "$(printf '%04o' $((0666 & ~0$(umask))))" "$dest"
+}
+
+cmd_ls() {
+  [ "$#" = 1 ] || usage_error
+  call GET "/files/list?path=$(urlencode "$1")&format=text" "$tmp/body"
+  print_text "$tmp/body"
+}
+
+cmd_logs() {
+  local query=''
+  while [ "$#" -gt 0 ]; do
+    case $1 in
+      emulator | daemon) query+="&source=$1" ;;
+      -n)
+        [ "$#" -ge 2 ] || usage_error
+        integers "$2"
+        query+="&lines=$((10#$2))"
+        shift
+        ;;
+      *) usage_error ;;
+    esac
+    shift
+  done
+  max_time=$quick_timeout
+  query=${query#&}
+  call GET "/logs${query:+?$query}" "$tmp/body"
+  print_text "$tmp/body"
+}
+
+cmd_token() {
+  max_time=$quick_timeout
+  case "$*" in
+    '') call GET "/auth/token?format=text" "$tmp/body" ;;
+    --rotate) post_json "/auth/token/rotate?format=text" '{}' ;;
+    *) usage_error ;;
+  esac
+  print_text "$tmp/body"
+}
+
+cmd_dashboard() {
+  [ "$#" = 0 ] || usage_error
+  max_time=$quick_timeout
+  post_json "/auth/login-link?format=text" '{}'
+  print_text "$tmp/body"
+}
+
+cmd_version() {
+  [ "$#" = 0 ] || usage_error
+  local version=unknown
+  if [ -f "$here/../VERSION" ]; then version=$(<"$here/../VERSION"); fi
+  echo "androidctl $version"
+  # Asking the daemon must not start the container.
+  if curl "${curl_args[@]}" --max-time 5 -o "$tmp/body" -f "$base_url/health" 2>/dev/null &&
+    version=$(json_field version "$tmp/body"); then
+    echo "appliance $version"
+  fi
+}
+
+# The daemon has no MCP server yet (docs/ARCHITECTURE.md describes it).
+cmd_mcp() {
+  die "mcp is not available in this version: the daemon has no MCP server yet"
+}
+
+doctor_failures=0
+container_running=0
+doctor_ok() { echo "ok   $*"; }
+doctor_warn() { echo "WARN $*"; }
+doctor_fail() {
+  echo "FAIL $*"
+  doctor_failures=$((doctor_failures + 1))
+}
+
+# rotational DIR: succeed when DIR is on a rotational disk.
+rotational() {
+  local source dev
+  source=$(df -P -- "$1" 2>/dev/null | awk 'NR == 2 { print $1 }')
+  case $source in /dev/*) ;; *) return 1 ;; esac
+  dev=/sys/class/block/$(basename "$(readlink -f -- "$source")")
+  # A partition reports through its disk.
+  if [ -e "$dev/partition" ]; then dev=$dev/..; fi
+  [ "$(cat "$dev/queue/rotational" 2>/dev/null)" = 1 ]
+}
+
+doctor_device() {
+  local node=$1 required=$2 group
+  if [ ! -e "$node" ]; then
+    "doctor_$required" "$node is missing"
+  elif [ -r "$node" ] && [ -w "$node" ]; then
+    doctor_ok "$node is usable"
+  else
+    group=$(stat -c %G -- "$node")
+    "doctor_$required" "$node is not usable by $(id -un); add the user to the group $group (sudo usermod -aG $group $(id -un)), then log in again"
+  fi
+}
+
+doctor_port() {
+  local port=$1 proto=$2 flag=-t listeners
+  [ "$proto" = tcp ] || flag=-u
+  listeners=$(ss -Hln "$flag" "sport = :$port" 2>/dev/null || true)
+  if [ -z "$listeners" ]; then
+    doctor_ok "port $port/$proto is free"
+  elif [ "$container_running" = 1 ] && podman port "$name" 2>/dev/null | grep -q ":$port\$"; then
+    doctor_ok "port $port/$proto is published by $name"
+  else
+    doctor_fail "port $port/$proto is in use by another program"
+  fi
+}
+
+cmd_doctor() {
+  [ "$#" = 0 ] || usage_error
+  if [ -z "$remote_url" ] && [ "$in_container" = 0 ]; then doctor_host; fi
+  if curl "${curl_args[@]}" --max-time 5 -o "$tmp/body" -f "$base_url/health" 2>/dev/null; then
+    doctor_ok "the daemon answers at $where (version $(json_field version "$tmp/body" || echo unknown))"
+  else
+    doctor_fail "the daemon does not answer at $where"
+  fi
+  [ "$doctor_failures" = 0 ]
+}
+
+doctor_host() {
+  local info rootless runtime cgroups state node free label image severity=warn
+  local quadlet_dir=${APPLIANCE_QUADLET_DIR:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/containers/systemd}
+  local override
+  override=$(dirname "$config_file")/$name.containers.conf
+  container_running=0
+
+  if ! command -v podman >/dev/null 2>&1; then
+    doctor_fail "podman is not installed"
+  elif ! info=$(podman info --format '{{.Host.Security.Rootless}} {{.Host.OCIRuntime.Name}} {{.Host.CgroupsVersion}}' 2>&1); then
+    doctor_fail "podman info failed: $info"
+  else
+    read -r rootless runtime cgroups <<<"$info"
+    if [ "$rootless" = true ]; then
+      doctor_ok "podman runs rootless"
+    else
+      doctor_fail "podman is not rootless; run the appliance as a normal user"
+    fi
+    if [ "$runtime" = crun ]; then
+      doctor_ok "the OCI runtime is crun"
+    else
+      doctor_warn "the OCI runtime is $runtime; the appliance is tested with crun"
+    fi
+    if [ "$cgroups" = v2 ]; then
+      doctor_ok "cgroups v2"
+    else
+      doctor_fail "cgroups $cgroups; rootless Podman needs cgroups v2"
+    fi
+    if [ "$(podman container inspect --format '{{.State.Running}}' "$name" 2>/dev/null)" = true ]; then
+      container_running=1
+    fi
+  fi
+
+  doctor_device /dev/kvm fail
+  if [ "${APPLIANCE_GPU:-auto}" = lavapipe ]; then
+    doctor_ok "APPLIANCE_GPU=lavapipe renders in software"
+  else
+    node=${APPLIANCE_GPU_DEVICE:-auto}
+    if [ "$node" = auto ]; then
+      node=$(find /dev/dri -maxdepth 1 -name 'renderD*' 2>/dev/null | sort | head -n 1)
+    fi
+    if [ "${APPLIANCE_GPU:-auto}" = host ]; then severity=fail; fi
+    if [ -n "$node" ]; then
+      doctor_device "$node" "$severity"
+    elif [ "${APPLIANCE_GPU:-auto}" = host ]; then
+      doctor_fail "APPLIANCE_GPU=host, but there is no render node in /dev/dri"
+    else
+      doctor_warn "there is no render node in /dev/dri; Android renders with lavapipe (slower)"
+    fi
+  fi
+
+  if [ -f "$override" ] && grep -qx 'label = true' "$override"; then
+    doctor_ok "SELinux labelling is on for $name ($override)"
+  else
+    doctor_fail "$override is missing; run install.sh"
+  fi
+  if [ "$container_running" = 1 ] && [ "$(cat /sys/fs/selinux/enforce 2>/dev/null)" = 1 ]; then
+    label=$(podman container inspect --format '{{.ProcessLabel}}' "$name" 2>/dev/null || true)
+    case $label in
+      *:container_t:*) doctor_ok "the container runs confined ($label)" ;;
+      *) doctor_warn "the container does not run as container_t (${label:-no label}); restart it with: systemctl --user restart $unit" ;;
+    esac
+  fi
+
+  if [ -e "/var/lib/systemd/linger/$(id -un)" ]; then
+    doctor_ok "lingering is on, so the appliance runs without a login"
+  else
+    doctor_warn "lingering is off, so the appliance stops at logout; run: loginctl enable-linger $(id -un)"
+  fi
+
+  if [ -f "$quadlet_dir/$name.container" ]; then
+    doctor_ok "the unit $quadlet_dir/$name.container exists"
+    if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet "$unit"; then
+      doctor_ok "$unit is active"
+    else
+      doctor_warn "$unit is not active; start it with: systemctl --user start $unit"
+    fi
+    # Without its image the unit cannot start, and only journalctl says why.
+    image=$(sed -n 's/^Image=//p' "$quadlet_dir/$name.container" | head -n 1)
+    if [ -n "$image" ] && command -v podman >/dev/null 2>&1; then
+      if podman image exists "$image"; then
+        doctor_ok "the image $image exists"
+      else
+        doctor_fail "the image $image is missing; run install.sh to build it"
+      fi
+    fi
+  elif [ "$container_running" = 1 ]; then
+    doctor_ok "the container $name runs without a unit (install.sh --print-run)"
+  else
+    doctor_fail "there is no unit $quadlet_dir/$name.container; run install.sh"
+  fi
+
+  if command -v ss >/dev/null 2>&1; then
+    doctor_port "${APPLIANCE_PORT:-6090}" tcp
+    doctor_port "${APPLIANCE_TURN_PORT:-3478}" udp
+    doctor_port "${APPLIANCE_TURN_PORT:-3478}" tcp
+  else
+    doctor_warn "cannot check the ports: ss is not installed"
+  fi
+
+  state=${APPLIANCE_STATE_DIR:-${XDG_DATA_HOME:-${HOME:-}/.local/share}/android-appliance}
+  if [ ! -d "$state" ]; then
+    doctor_warn "the state directory $state does not exist yet; install.sh creates it"
+  else
+    if rotational "$state"; then
+      doctor_warn "$state is on a rotational disk; Android boots and runs much slower there"
+    else
+      doctor_ok "$state is not on a rotational disk"
+    fi
+    free=$(df -Pk -- "$state" | awk 'NR == 2 { print int($4 / 1048576) }')
+    if [ "${free:-0}" -lt 10 ]; then
+      doctor_warn "only ${free:-0} GiB are free for $state; the AVD can grow to APPLIANCE_DISK_SIZE (${APPLIANCE_DISK_SIZE:-32G})"
+    else
+      doctor_ok "$free GiB are free for $state"
+    fi
+  fi
+}
+
+[ "$#" -ge 1 ] || usage_error
+cmd=$1
+shift
+
+case "$cmd" in
+  status)
+    [ "$#" = 0 ] || usage_error
+    cmd_status
+    ;;
+  start | restart) lifecycle "$cmd" "$@" ;;
+  stop) cmd_stop "$@" ;;
+  wait) cmd_wait "$@" ;;
+  display)
+    [ "$#" = 0 ] || usage_error
+    listen_url
+    ;;
+  dashboard) cmd_dashboard "$@" ;;
+  screenshot) cmd_screenshot "$@" ;;
+  ui) cmd_ui "$@" ;;
+  tap) cmd_tap "$@" ;;
+  long-press) cmd_long_press "$@" ;;
+  swipe) cmd_swipe "$@" ;;
+  text)
+    need 1 "$@"
+    post_text /input/text "$*"
+    ;;
+  key) cmd_key "$@" ;;
+  shell)
+    need 1 "$@"
+    cmd_shell "$@"
+    ;;
+  install) cmd_install "$@" ;;
+  uninstall) cmd_uninstall "$@" ;;
+  apps) cmd_apps "$@" ;;
+  launch) cmd_app_action launch "$@" ;;
+  force-stop) cmd_app_action stop "$@" ;;
+  push) cmd_push "$@" ;;
+  pull) cmd_pull "$@" ;;
+  ls) cmd_ls "$@" ;;
+  logs) cmd_logs "$@" ;;
+  token) cmd_token "$@" ;;
+  mcp) cmd_mcp "$@" ;;
+  doctor) cmd_doctor "$@" ;;
+  version) cmd_version "$@" ;;
+  -h | --help | help) usage ;;
+  *) usage_error ;;
+esac

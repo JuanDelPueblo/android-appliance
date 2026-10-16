@@ -1,0 +1,15 @@
+# The build context holds only what the Containerfile copies. Everything
+# else (state, virtual environments, generated stubs) stays out.
+*
+!VERSION
+!appliance/
+!bin/androidctl
+!conf/sdk.lock
+!requirements.lock
+!requirements-dev.lock
+!scripts/fetch-sdk.sh
+!scripts/gen-protos.sh
+!web/
+appliance/_proto/
+**/__pycache__/
+**/*.pyc

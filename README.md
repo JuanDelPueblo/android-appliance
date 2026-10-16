@@ -162,11 +162,95 @@ avd-init: but APPLIANCE_STATE_DIR in /etc/android-appliance/appliance.conf expec
 avd-init: refusing to inspect one AVD while the emulator would launch another.
 ```
 
-## Install on Fedora Server (or another systemd distribution)
+## Install v2: a rootless Podman container
 
-The appliance also installs without Nix, with its own installer.
-`install.sh` is the single entry point: it installs the pinned Android
-SDK, the scripts, the units and the rules.
+Version 2 (in development) runs the whole appliance in one rootless
+Podman container: the emulator and a control daemon with an HTTP API.
+`docs/ARCHITECTURE.md` describes the design. The host needs Podman 4.4
+or later with Quadlet, KVM, and a DRM render node for GPU rendering. It
+needs no Android SDK: the image build downloads the pinned SDK.
+
+Run the installer as the user who owns the appliance, not as root:
+
+```bash
+./install.sh
+loginctl enable-linger "$USER"   # run without a login
+androidctl status
+androidctl screenshot
+```
+
+The first run creates `~/.config/android-appliance/appliance.conf` from
+`conf/appliance.conf.example`, and builds the image
+`localhost/android-appliance:<version>-api36`. The build downloads about
+2.5 GB of SDK. The SDK license does not allow you to publish the image.
+Then the installer writes the Quadlet unit
+`~/.config/containers/systemd/android-appliance.container`, links
+`~/.local/bin/androidctl` and starts the unit. Android stays off until
+a command needs it. The first boot creates the AVD.
+
+| Command | Effect |
+|---|---|
+| `./install.sh` | apply a configuration change, or build and switch to a new image; the previous image is kept |
+| `./install.sh --rollback` | switch back to the previous image |
+| `./install.sh --doctor` | check the host (also `androidctl doctor`) |
+| `./install.sh --uninstall` | remove the unit, the images and `androidctl`; keep the state and the configuration |
+| `./install.sh --uninstall --purge` | also delete the state directory, with all apps and data of Android |
+| `./install.sh --print-run` | install for a host without systemd, and print the `podman run` command |
+
+`androidctl` keeps the v1 commands, and adds `long-press`, `apps`,
+`launch`, `force-stop`, `uninstall`, `ls`, `logs`, `token`, `dashboard`,
+`doctor` and `version`. On the host it uses the unix socket
+`$XDG_RUNTIME_DIR/android-appliance/api.sock`. In the container,
+`podman exec android-appliance androidctl status` works too. A remote
+client uses the HTTP port and the API token:
+
+```bash
+ANDROID_APPLIANCE_URL=http://127.0.0.1:6090 ANDROID_APPLIANCE_TOKEN=<token> androidctl status
+```
+
+Another configuration file gives a second instance:
+`./install.sh --config FILE`, then `ANDROID_APPLIANCE_CONFIG=FILE androidctl ...`.
+Give it its own `APPLIANCE_NAME`, `APPLIANCE_STATE_DIR` and ports:
+`install.sh` stops when a name belongs to another configuration, when a
+state directory belongs to another instance, and when the state directory
+is not empty and holds no appliance state. `--uninstall` needs the
+configuration file of the instance, so a mistyped `--config` removes
+nothing. A v1 appliance can stay installed when v2 has its own state
+directory and ports. Do not boot both emulators at once on a small host.
+
+If the daemon does not come up after the restart (for example because of
+a wrong value in the configuration), `install.sh` fails with the last
+lines of the journal. After an update, `./install.sh --rollback` goes
+back to the previous image.
+
+### Security of the v2 container
+
+- The container is rootless, drops all capabilities, has a read-only
+  root and runs with SELinux separation. The published ports listen on
+  `127.0.0.1` by default. The state directory is private (mode 0700).
+- The API needs the token (`androidctl token`) or a session from
+  `androidctl dashboard`; the unix socket of the host user needs neither.
+  The token travels as plain HTTP: for another `APPLIANCE_LISTEN_ADDRESS`,
+  put a reverse proxy with TLS in front and set `APPLIANCE_TRUST_PROXY=1`
+  (the proxy must add the client address to `X-Forwarded-For`).
+  Everything on the host's loopback shares one count of failed tokens.
+  The session cookie is sent to every port of the same host name.
+- **Android is not contained by the container.** The emulator's network
+  maps `10.0.2.2` to the container's loopback, so every app in Android
+  with the `INTERNET` permission can reach the ports there. The console,
+  the emulator's gRPC and the API need a token; the adb server does
+  not, and it gives the `shell` user (screenshots, input, installs, the
+  files in `/data/local/tmp`). This cannot be closed: the emulator
+  registers with the adb server on the loopback. Do not install apps you
+  do not trust on a device that holds a Google account (the Play Store
+  image runs apps from anywhere). `docs/ARCHITECTURE.md` has the
+  details and the measurements.
+
+## Install v1 on Fedora Server (or another systemd distribution)
+
+The v1 appliance also installs without Nix, with its own installer.
+`legacy/install.sh` is the single entry point: it installs the pinned
+Android SDK, the scripts, the units and the rules.
 
 1. Install the operating-system packages, as root. Fedora 44 ships no
    scrcpy; the zeno/scrcpy COPR provides it:
@@ -184,7 +268,7 @@ SDK, the scripts, the units and the rules.
    so on. Then edit `/etc/android-appliance/appliance.conf`.
 
    ```bash
-   install -Dm644 conf/appliance.conf.example /etc/android-appliance/appliance.conf
+   install -Dm644 legacy/appliance.conf.example /etc/android-appliance/appliance.conf
    ```
 
 3. Install and start, as root. The installer also creates the
@@ -192,11 +276,11 @@ SDK, the scripts, the units and the rules.
    it. The first run downloads about 2.5 GB for the SDK.
 
    ```bash
-   ./install.sh
+   ./legacy/install.sh
    androidctl start
    ```
 
-`install.sh` is idempotent: run it again after a configuration change.
+`legacy/install.sh` is idempotent: run it again after a configuration change.
 It installs the scripts under `/usr/local`, the unit files under
 `/etc/systemd/system` with a deployment drop-in, the tmpfiles rule and
 the polkit rule. It enables and starts the display socket when the
@@ -209,7 +293,7 @@ idle display input uses `display-idle`, a small Python helper that needs
 
 ### The Android SDK
 
-`install.sh` runs `scripts/provision-sdk.sh`, which installs the SDK in
+`legacy/install.sh` runs `scripts/provision-sdk.sh`, which installs the SDK in
 `APPLIANCE_ANDROID_HOME` (default `/opt/android-sdk`). You can also run
 the script alone, as root. The emulator and the system image are not in
 the Fedora repositories.
@@ -237,7 +321,7 @@ to `/etc/android-appliance/sdk.lock`. The script reads that file first.
 | `cmdline-tools` (only when `APPLIANCE_SDK_CMDLINE_TOOLS_VERSION` is set) | 23.0 |
 
 To manage the SDK yourself, set `APPLIANCE_SDK_MANAGED=0`. Then
-`install.sh` does not change the SDK. It only runs the check below.
+`legacy/install.sh` does not change the SDK. It only runs the check below.
 
 `./scripts/provision-sdk.sh --check` checks an installed SDK and changes
 nothing. It finds the emulator, adb and the system image, and runs
@@ -256,17 +340,17 @@ not the pin.
 Run as root:
 
 ```bash
-./install.sh --uninstall
+./legacy/install.sh --uninstall
 ```
 
 The command stops Android and the display, and disables the display
-socket. Then it removes the unit files, the drop-ins of `install.sh`,
+socket. Then it removes the unit files, the drop-ins of `legacy/install.sh`,
 the boot links, the scripts and the `androidctl` links in
 `/usr/local`, the tmpfiles rule and the polkit rule. It keeps a drop-in
 that you added, the configuration in `/etc/android-appliance`, the
 state directory, the SDK and the system user.
 
-WARNING: `./install.sh --uninstall --purge` also deletes the state
+WARNING: `./legacy/install.sh --uninstall --purge` also deletes the state
 directory and the configuration. This deletes all apps, accounts and
 data on the device. The command refuses a shared directory such as
 `/var/lib` or a home directory.
@@ -306,34 +390,60 @@ WARNING: Step 2 deletes all apps, accounts and data on the device.
 
 ## androidctl
 
+The v2 appliance is controlled with `androidctl` (a bash script; the host
+needs only `curl`). The v1 appliance has its own `androidctl` from
+`legacy/install.sh`, with the commands of v1.
+
 ```text
 androidctl status                        state, boot readiness, idle time
 androidctl start [--no-wait]             cold boot, then wait until usable
 androidctl stop                          shut down, keeping apps and userdata
 androidctl restart [--no-wait]           stop, then start
 androidctl wait                          block until the current boot completes
-androidctl display                       print the local browser display URL
+androidctl display                       print the URL of the dashboard
+androidctl dashboard                     print a one-time login link
 
 androidctl screenshot [file]             save a PNG and print its path
 androidctl ui                            print the UI hierarchy XML
 androidctl tap <x> <y>
+androidctl long-press <x> <y> [ms]
 androidctl swipe <x1> <y1> <x2> <y2> [ms]
 androidctl text <string>
 androidctl key <keyevent>
 androidctl shell <command...>
-androidctl install <apk> [adb-args...]
+androidctl install <apk> [-r|-g|-d|-t]   replace, grant, downgrade, test
+androidctl uninstall <package> [-k]      -k keeps the data
+androidctl apps [--all]                  list the installed apps
+androidctl launch <package>
+androidctl force-stop <package>
 androidctl push <local> <remote>
 androidctl pull <remote> <local>
+androidctl ls <remote>
+
+androidctl logs [emulator|daemon] [-n N]
+androidctl token [--rotate]              print the API token, or replace it
+androidctl doctor                        check the host and the appliance
+androidctl version
 ```
 
-The automation commands start Android when necessary and update
-the activity time. `status`, `wait`, `stop` and `display` do
-not update the activity time. `status` never starts or wakes Android.
+The automation commands start Android when necessary and update the
+activity time. `status`, `wait`, `stop` and `display` do not update it.
+`status` never starts or wakes Android.
 
 Exit status: `0` for success, `1` for an error, `2` for a usage error.
 
-Run `androidctl` as the configured user. When root runs it, it runs again
-as the configured user.
+Some commands differ from v1, because they go through the daemon and not
+through `adb`:
+
+- `shell` does not pass standard input to the device. `echo x | androidctl
+  shell 'cat > f'` is refused (exit status 2): copy data with `push`.
+- `push` and `pull` copy one file, not a directory. `push` into an existing
+  device directory (`androidctl push a.txt /sdcard/Download`) puts the file
+  in it.
+- A command with extra arguments (`status x`, `tap 1 2 3`) is a usage
+  error. v1 ignored them.
+- `install` takes only `-r`, `-g`, `-d` and `-t`.
+- `mcp` needs the MCP server of the daemon, which is not in this version.
 
 ## Lifecycle states
 
@@ -516,7 +626,8 @@ nix flake check                    # lint, unit tests, module evaluation
 nix build .#integration-test -L    # real emulator in a NixOS VM (KVM, nested)
 ./run-tests.sh                     # no KVM: lint, bash tests, unit checks,
                                    # staged install, plugin and dashboard tests
-./tests/smoke.sh                   # installed host with KVM: real emulator
+./tests/smoke.sh                   # installed v1 host with KVM: real emulator
+make e2e                           # v2 with KVM and Podman: tests/e2e/lifecycle.sh
 hermes plugins validate .          # Hermes admission checks
 hermes plugins doctor . --ci       # Hermes runtime contract checks
 ```
@@ -525,8 +636,17 @@ hermes plugins doctor . --ci       # Hermes runtime contract checks
 fake `systemctl`, `adb` and idle commands, the `avd-init` tests, the
 configuration-loader tests, the unit-file checks, the SDK check tests
 with a fake `ldd`, a staged installation test, the Hermes plugin tests
-and the dashboard tests. It needs no KVM. It reports a SKIP when a tool such as shellcheck, node or a Python
+and the dashboard tests. It also runs the v2 tests: `androidctl` and
+`install.sh` against fakes, and the Python tests of the daemon in
+`tests/python` (in the `.venv` of `scripts/dev-venv.sh`). It needs no KVM.
+It reports a SKIP when a tool such as shellcheck, node or a Python
 module is not installed.
+
+`tests/e2e/lifecycle.sh` (`make e2e`) tests v2 on a real host. It
+installs its own instance `aa-e2e` from the built image, boots Android,
+runs the operations, checks that userdata survives a stop, a container
+recreation and a crash, checks the idle stop, and removes the instance
+again. It takes about 6 minutes.
 
 `nix flake check` runs:
 

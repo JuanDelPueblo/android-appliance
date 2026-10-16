@@ -62,10 +62,15 @@ in
 {
   androidctl = pkgs.callPackage ./package.nix { };
 
+  # The same files as run-tests.sh; the Python fakes are not shell scripts.
   shellcheck = pkgs.runCommand "shellcheck" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
     cd ${src}
-    shellcheck -x src/androidctl src/avd-init src/appliance-env src/emulator-launch src/display-scrcpy \
-      install.sh scripts/provision-sdk.sh tests/*.sh tests/fakes/* run-tests.sh
+    files=(bin/androidctl install.sh run-tests.sh legacy/*.sh scripts/*.sh tests/*.sh tests/e2e/*.sh \
+      src/androidctl src/avd-init src/appliance-env src/emulator-launch src/display-scrcpy)
+    for file in tests/fakes/*; do
+      case $file in *.py) ;; *) files+=("$file") ;; esac
+    done
+    shellcheck -x "''${files[@]}"
     touch $out
   '';
 

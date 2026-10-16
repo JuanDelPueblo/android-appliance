@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for install.sh: a staged installation with a custom
-# configuration and the default configuration.
+# Tests for legacy/install.sh (the v1 installer): a staged installation
+# with a custom configuration and the default configuration.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -21,7 +21,7 @@ APPLIANCE_GROUP=Testers
 APPLIANCE_GPU=host
 APPLIANCE_DISPLAY_PORT=6091
 EOF
-bash "$here/../install.sh" --root "$root" >/dev/null
+bash "$here/install.sh" --root "$root" >/dev/null
 
 libexec=$root/usr/local/libexec/android-appliance
 for file in androidctl avd-init appliance-env emulator-launch display-scrcpy display-idle; do
@@ -96,7 +96,7 @@ echo "ok   polkit rule"
 # made.
 mkdir -p "$units/timers.target.wants"
 ln -s "$units/android-appliance-idle.timer" "$units/timers.target.wants/android-appliance-idle.timer"
-bash "$here/../install.sh" --root "$root" >/dev/null
+bash "$here/install.sh" --root "$root" >/dev/null
 grep_file '^User=tester$' "$dropin"
 echo "ok   idempotent re-run"
 if [ -L "$units/timers.target.wants/android-appliance-idle.timer" ]; then
@@ -112,7 +112,7 @@ echo userdata >"$root/var/appliance-test/avd/userdata.img"
 echo "[Service]" >"$units/android-appliance-emulator.service.d/60-local.conf"
 mkdir -p "$units/sockets.target.wants"
 ln -s "$units/android-appliance-display.socket" "$units/sockets.target.wants/android-appliance-display.socket"
-bash "$here/../install.sh" --root "$root" --uninstall >/dev/null 2>&1
+bash "$here/install.sh" --root "$root" --uninstall >/dev/null 2>&1
 for path in \
   usr/local/libexec/android-appliance usr/local/bin/androidctl usr/local/bin/android-avd-init \
   etc/tmpfiles.d/android-appliance.conf etc/polkit-1/rules.d/49-android-appliance.rules \
@@ -146,14 +146,14 @@ fi
 echo "ok   uninstall keeps local drop-ins, the configuration and the state"
 
 # --purge works only with --uninstall.
-if bash "$here/../install.sh" --root "$root" --purge >/dev/null 2>&1; then
+if bash "$here/install.sh" --root "$root" --purge >/dev/null 2>&1; then
   echo "FAIL --purge without --uninstall must fail" >&2
   exit 1
 fi
 
 # --uninstall --purge also deletes the state directory and the
 # configuration.
-bash "$here/../install.sh" --root "$root" --uninstall --purge >/dev/null 2>&1
+bash "$here/install.sh" --root "$root" --uninstall --purge >/dev/null 2>&1
 if [ -e "$root/var/appliance-test" ] || [ -e "$root/etc/android-appliance" ]; then
   echo "FAIL --purge kept the state directory or the configuration" >&2
   exit 1
@@ -163,7 +163,7 @@ echo "ok   uninstall --purge deletes the state and the configuration"
 # --purge refuses a state directory that is not a dedicated directory.
 mkdir -p "$root/etc/android-appliance" "$root/var/lib/other"
 echo "APPLIANCE_STATE_DIR=/var/lib/" >"$root/etc/android-appliance/appliance.conf"
-if bash "$here/../install.sh" --root "$root" --uninstall --purge >/dev/null 2>&1; then
+if bash "$here/install.sh" --root "$root" --uninstall --purge >/dev/null 2>&1; then
   echo "FAIL --purge must refuse APPLIANCE_STATE_DIR=/var/lib/" >&2
   exit 1
 fi
@@ -173,7 +173,7 @@ fi
 }
 echo "APPLIANCE_STATE_DIR=/home/tester" >"$root/etc/android-appliance/appliance.conf"
 mkdir -p "$root/home/tester"
-if bash "$here/../install.sh" --root "$root" --uninstall --purge >/dev/null 2>&1 || [ ! -d "$root/home/tester" ]; then
+if bash "$here/install.sh" --root "$root" --uninstall --purge >/dev/null 2>&1 || [ ! -d "$root/home/tester" ]; then
   echo "FAIL --purge must refuse a home directory" >&2
   exit 1
 fi
@@ -182,7 +182,7 @@ echo "ok   uninstall --purge refuses a shared directory"
 # Without a configuration the installer stages the example file and its
 # defaults: software GPU, so no host gpu drop-in.
 root2=$(mktemp -d)
-bash "$here/../install.sh" --root "$root2" >/dev/null
+bash "$here/install.sh" --root "$root2" >/dev/null
 [ -f "$root2/etc/android-appliance/appliance.conf" ] || {
   echo "FAIL the example configuration was not staged" >&2
   exit 1
@@ -200,7 +200,7 @@ rm -rf "$root2"
 root3=$(mktemp -d)
 mkdir -p "$root3/etc/android-appliance"
 echo "APPLIANCE_SDK_MANAGED=maybe" >"$root3/etc/android-appliance/appliance.conf"
-if bash "$here/../install.sh" --root "$root3" >/dev/null 2>&1; then
+if bash "$here/install.sh" --root "$root3" >/dev/null 2>&1; then
   echo "FAIL APPLIANCE_SDK_MANAGED=maybe must stop the installer" >&2
   exit 1
 fi
