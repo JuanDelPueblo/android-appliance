@@ -79,6 +79,7 @@ The configuration is `${XDG_CONFIG_HOME:-~/.config}/android-appliance/appliance.
 | `APPLIANCE_LISTEN_ADDRESS` | `127.0.0.1` | address of the published ports |
 | `APPLIANCE_PORT` | `6090` | HTTP port (dashboard, API) |
 | `APPLIANCE_TURN_PORT` | `3478` | TURN port (UDP and TCP) |
+| `APPLIANCE_TURN_LISTEN_ADDRESSES` | empty | comma separated addresses that publish the TURN port; empty uses `APPLIANCE_LISTEN_ADDRESS`. Keeps the HTTP port on the loopback behind a proxy while the video reaches the network |
 | `APPLIANCE_TURN_HOST` | empty | host name or IP address in the TURN URLs; empty uses the host name of the page |
 | `APPLIANCE_TRUST_PROXY` | `0` | `1` trusts `X-Forwarded-Proto`, `-Host` and `-For` from a reverse proxy |
 | `APPLIANCE_AVD_NAME` | `android` | name of the AVD |

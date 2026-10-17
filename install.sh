@@ -205,6 +205,19 @@ load_settings() {
   else
     die "APPLIANCE_LISTEN_ADDRESS '$listen' is not an IPv4 or IPv6 address"
   fi
+  turn_publish=()
+  local turn_listen=${APPLIANCE_TURN_LISTEN_ADDRESSES:-$listen} turn_address
+  IFS=, read -r -a turn_addresses <<<"$turn_listen"
+  [ "${#turn_addresses[@]}" -gt 0 ] || die "APPLIANCE_TURN_LISTEN_ADDRESSES is empty"
+  for turn_address in "${turn_addresses[@]}"; do
+    if [[ $turn_address =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      turn_publish+=("$turn_address")
+    elif [[ $turn_address =~ ^[0-9A-Fa-f:.]+$ ]] && [[ $turn_address == *:* ]]; then
+      turn_publish+=("[$turn_address]")
+    else
+      die "APPLIANCE_TURN_LISTEN_ADDRESSES entry '$turn_address' is not an IPv4 or IPv6 address"
+    fi
+  done
   case $listen in
     127.* | ::1) ;;
     *) warn "APPLIANCE_LISTEN_ADDRESS=$listen publishes the API on the network as plain HTTP: the token, the session cookie and the screenshots can be read on the way. Keep 127.0.0.1, or put a reverse proxy with TLS in front of the port and set APPLIANCE_TRUST_PROXY=1." ;;
@@ -643,8 +656,13 @@ EOF
 Volume=$state_dir:/data:Z,nosuid,nodev
 Volume=%t/$name:/run/appliance:Z
 PublishPort=$publish_address:$port:8080/tcp
-PublishPort=$publish_address:$turn_port:3478/udp
-PublishPort=$publish_address:$turn_port:3478/tcp
+EOF
+  local address
+  for address in "${turn_publish[@]}"; do
+    echo "PublishPort=$address:$turn_port:3478/udp"
+    echo "PublishPort=$address:$turn_port:3478/tcp"
+  done
+  cat <<EOF
 EnvironmentFile=$config_file
 Environment=APPLIANCE_LISTEN_ADDRESS=$listen APPLIANCE_PORT=$port APPLIANCE_TURN_PORT=$turn_port APPLIANCE_GPU=$gpu
 StopTimeout=150
@@ -682,7 +700,6 @@ print_run() {
   options+=(
     "-v $(quote "$state_dir:/data:Z,nosuid,nodev") -v $(quote "$runtime_dir:/run/appliance:Z")"
     "-p $(quote "$publish_address:$port:8080/tcp")"
-    "-p $(quote "$publish_address:$turn_port:3478/udp") -p $(quote "$publish_address:$turn_port:3478/tcp")"
     "--env-file $(quote "$config_file")"
     "--env APPLIANCE_LISTEN_ADDRESS=$(quote "$listen") --env APPLIANCE_PORT=$port"
     "--env APPLIANCE_TURN_PORT=$turn_port --env APPLIANCE_GPU=$gpu"
@@ -691,7 +708,10 @@ print_run() {
   echo "# Run $name without systemd. Stop it with: podman stop -t 150 $name"
   echo "install -d -m 0700 $(quote "$runtime_dir")"
   echo "CONTAINERS_CONF_OVERRIDE=$(quote "$override_file") podman run -d \\"
-  local option
+  local option address
+  for address in "${turn_publish[@]}"; do
+    options+=("-p $(quote "$address:$turn_port:3478/udp") -p $(quote "$address:$turn_port:3478/tcp")")
+  done
   for option in "${options[@]}"; do
     echo "  $option \\"
   done

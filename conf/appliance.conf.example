@@ -34,6 +34,12 @@ APPLIANCE_LISTEN_ADDRESS=127.0.0.1
 APPLIANCE_PORT=6090
 APPLIANCE_TURN_PORT=3478
 
+# Optional, install only: comma separated addresses that publish the TURN
+# port, instead of APPLIANCE_LISTEN_ADDRESS. Use it to keep the HTTP port
+# on 127.0.0.1 behind a reverse proxy while the video reaches browsers on
+# the LAN, for example 192.168.1.10,100.64.0.1. Empty: the listen address.
+APPLIANCE_TURN_LISTEN_ADDRESSES=
+
 # Host name in the TURN URLs that the dashboard gets. Empty: the host
 # name of the dashboard page.
 APPLIANCE_TURN_HOST=

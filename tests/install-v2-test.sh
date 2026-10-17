@@ -193,6 +193,23 @@ if [ -n "$generator" ]; then
 fi
 echo "ok   custom configuration, IPv6, lavapipe, keep-groups"
 
+# The TURN port can publish on other addresses than the HTTP port.
+new_root turnaddr
+APPLIANCE_TURN_LISTEN_ADDRESSES=192.168.1.5,fd00::5 stage >"$tmp/out" 2>&1 || fail "TURN addresses: $(cat "$tmp/out")"
+unit=$root/home/tester/.config/containers/systemd/android-appliance.container
+for line in \
+  "PublishPort=127.0.0.1:6090:8080/tcp" \
+  "PublishPort=192.168.1.5:3478:3478/udp" \
+  "PublishPort=192.168.1.5:3478:3478/tcp" \
+  "PublishPort=[fd00::5]:3478:3478/udp" \
+  "PublishPort=[fd00::5]:3478:3478/tcp"; do
+  has "$line" "$unit"
+done
+lacks 'PublishPort=127.0.0.1:3478' "$unit"
+APPLIANCE_TURN_LISTEN_ADDRESSES=lan stage_fails
+grep -q 'APPLIANCE_TURN_LISTEN_ADDRESSES entry' "$tmp/out" || fail "bad TURN address: $(cat "$tmp/out")"
+echo "ok   separate TURN listen addresses"
+
 # Render node rules.
 new_root render
 rm "$root/dev/dri/renderD128"
