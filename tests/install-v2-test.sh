@@ -658,6 +658,118 @@ stage_fails
 grep -q 'a v1 appliance uses /var/lib/android-appliance' "$tmp/out" || fail "v1 defaults: $(cat "$tmp/out")"
 echo "ok   coexistence with a v1 appliance"
 
+# --migrate turns a v1 appliance into a v2 instance on the same state.
+migrate_root() {
+  v1_root "$1"
+  mkdir -p "$root/etc/systemd/system/multi-user.target.wants" "$root/etc/systemd/system/sockets.target.wants" "$root/etc/systemd/system/timers.target.wants"
+  for v1u in android-appliance-display.socket android-appliance-idle.timer android-appliance-display.service android-appliance-scrcpy.service android-appliance-xvnc.service android-appliance-idle.service; do
+    touch "$root/etc/systemd/system/$v1u"
+  done
+  ln -s ../android-appliance-emulator.service "$root/etc/systemd/system/multi-user.target.wants/android-appliance-emulator.service"
+  ln -s ../android-appliance-display.socket "$root/etc/systemd/system/sockets.target.wants/android-appliance-display.socket"
+  ln -s ../android-appliance-idle.timer "$root/etc/systemd/system/timers.target.wants/android-appliance-idle.timer"
+  cat >"$root/etc/android-appliance/appliance.conf" <<EOF
+APPLIANCE_STATE_DIR=/var/lib/juno/android
+APPLIANCE_USER=$user
+APPLIANCE_AVD_NAME=pixel
+APPLIANCE_API_LEVEL=35
+APPLIANCE_IDLE_STOP_MINUTES=30
+APPLIANCE_MEMORY_MIB=6144
+APPLIANCE_CORES=6
+APPLIANCE_DISK_SIZE=64G
+APPLIANCE_GPU=host
+APPLIANCE_DISPLAY_ENABLED=1
+APPLIANCE_DISPLAY_PORT=6091
+EOF
+  mkdir -p "$root/var/lib/juno/android/avd/pixel.avd" "$root/var/lib/juno/android/home/.android"
+  printf 'avd.ini.encoding=UTF-8\npath=/var/lib/juno/android/avd/pixel.avd\n' >"$root/var/lib/juno/android/avd/pixel.ini"
+  printf 'image.sysdir.1=system-images/android-35/google_apis_playstore/x86_64/\n' >"$root/var/lib/juno/android/avd/pixel.avd/config.ini"
+  echo key >"$root/var/lib/juno/android/home/.android/adbkey"
+  manifest=$root/home/tester/.config/android-appliance/android-appliance.migration
+}
+migrate_root migrate
+stage --migrate --no-start >"$tmp/out" 2>&1 || fail "--migrate failed: $(cat "$tmp/out")"
+# The v2 configuration is the v1 one, translated.
+for line in \
+  "APPLIANCE_STATE_DIR=/var/lib/juno/android" \
+  "APPLIANCE_PORT=6091" \
+  "APPLIANCE_TURN_PORT=3478" \
+  "APPLIANCE_AVD_NAME=pixel" \
+  "APPLIANCE_API_LEVEL=35" \
+  "APPLIANCE_GPU=host" \
+  "APPLIANCE_IDLE_STOP_MINUTES=30" \
+  "APPLIANCE_MEMORY_MIB=6144" \
+  "APPLIANCE_CORES=6" \
+  "APPLIANCE_DISK_SIZE=64G"; do
+  has "$line" "$conf"
+done
+[ "$(stat -c %a "$conf")" = 600 ] || fail "the migrated configuration is not private"
+# The manifest records what --migrate-back needs.
+has "V1_CONFIG=/etc/android-appliance/appliance.conf" "$manifest"
+has "V1_STATE_DIR=/var/lib/juno/android" "$manifest"
+has "V1_OWNER=$user" "$manifest"
+has "V1_ENABLED=android-appliance-idle.timer android-appliance-display.socket android-appliance-emulator.service" "$manifest"
+# The root steps are printed, and v2 is not installed before they are done.
+grep -q '^  sudo systemctl disable --now android-appliance-idle.timer android-appliance-display.socket android-appliance-emulator.service' "$tmp/out" ||
+  fail "no stop command for the v1 units: $(cat "$tmp/out")"
+lacks 'chown' "$tmp/out"
+[ ! -e "$unit" ] || fail "--migrate installed v2 before the v1 units were stopped"
+# The v1 units stopped (the wants links are gone): the install goes through.
+rm "$root"/etc/systemd/system/*.wants/*
+stage --migrate --no-start >"$tmp/out" 2>&1 && fail "--migrate ran again over the configuration"
+grep -q 'exists already' "$tmp/out" || fail "no refusal of a second migration: $(cat "$tmp/out")"
+stage --no-start >"$tmp/out" 2>&1 || fail "the install after the migration failed: $(cat "$tmp/out")"
+has "Volume=/var/lib/juno/android:/data:Z,nosuid,nodev" "$unit"
+has "Image=localhost/android-appliance:$version-api35" "$unit"
+has "PublishPort=127.0.0.1:6091:8080/tcp" "$unit"
+[ "$(cat "$root/var/lib/juno/android/.android-appliance-instance")" = android-appliance ] || fail "the state is not marked"
+lacks 'a v1 appliance uses' "$tmp/out"
+# The v1 registry and keys are untouched.
+[ "$(cat "$root/var/lib/juno/android/avd/pixel.ini")" = $'avd.ini.encoding=UTF-8\npath=/var/lib/juno/android/avd/pixel.avd' ] || fail "the v1 registry changed"
+[ "$(cat "$root/var/lib/juno/android/home/.android/adbkey")" = key ] || fail "the adb key changed"
+echo "ok   --migrate"
+
+# A migration in one go: v1 is already stopped, and v1 ran as this user.
+migrate_root migrate-stopped
+rm "$root"/etc/systemd/system/*.wants/*
+stage --migrate --no-start >"$tmp/out" 2>&1 || fail "--migrate (v1 stopped) failed: $(cat "$tmp/out")"
+grep -q 'installing v2 on the v1 state' "$tmp/out" || fail "the one-go migration did not install: $(cat "$tmp/out")"
+has "Volume=/var/lib/juno/android:/data:Z,nosuid,nodev" "$unit"
+has "V1_ENABLED=" "$manifest"
+echo "ok   --migrate with v1 stopped"
+
+# --migrate-back removes the v2 unit and prints what brings v1 back.
+stage --migrate-back >"$tmp/out" 2>&1 || fail "--migrate-back failed: $(cat "$tmp/out")"
+[ ! -e "$unit" ] || fail "--migrate-back kept the unit"
+[ -f "$conf" ] && [ -f "$manifest" ] || fail "--migrate-back removed the configuration or the manifest"
+[ ! -e "$root/var/lib/juno/android/.android-appliance-instance" ] || fail "--migrate-back kept the state marker"
+[ -d "$root/var/lib/juno/android/avd/pixel.avd" ] || fail "--migrate-back touched the state"
+grep -q '^  sudo restorecon -R /var/lib/juno/android' "$tmp/out" || fail "no restorecon step: $(cat "$tmp/out")"
+lacks 'systemctl enable' "$tmp/out"
+# The migration of the first root recorded enabled units: they come back.
+root=$tmp/migrate conf=$root/home/tester/.config/android-appliance/appliance.conf unit=$root/home/tester/.config/containers/systemd/android-appliance.container
+stage --migrate-back >"$tmp/out" 2>&1 || fail "--migrate-back (enabled units) failed: $(cat "$tmp/out")"
+grep -q '^  sudo systemctl enable --now android-appliance-idle.timer android-appliance-display.socket android-appliance-emulator.service' "$tmp/out" ||
+  fail "no enable step: $(cat "$tmp/out")"
+# v2 installs again on the same configuration afterwards.
+stage --no-start >"$tmp/out" 2>&1 || fail "the reinstall after --migrate-back failed: $(cat "$tmp/out")"
+[ -f "$unit" ] || fail "no unit after the reinstall"
+echo "ok   --migrate-back"
+
+# Refusals.
+migrate_root migrate-refusals
+rm "$root/etc/android-appliance/appliance.conf"
+stage_fails --migrate
+grep -q 'there is no v1 appliance to migrate' "$tmp/out" || fail "migrate without v1: $(cat "$tmp/out")"
+new_root migrate-no-manifest
+stage --no-start >/dev/null 2>&1
+stage_fails --migrate-back
+grep -q 'was not migrated from v1' "$tmp/out" || fail "migrate-back without a manifest: $(cat "$tmp/out")"
+rc=0
+stage --migrate --uninstall >"$tmp/out" 2>&1 || rc=$?
+if [ "$rc" != 2 ] || ! grep -q 'does not combine' "$tmp/out"; then fail "--migrate --uninstall was not a usage error: $(cat "$tmp/out")"; fi
+echo "ok   --migrate refusals"
+
 # A state directory on a rotational disk gets a warning. The staged
 # sysfs describes the disk of the staging directory.
 new_root rotational

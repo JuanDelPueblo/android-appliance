@@ -345,6 +345,39 @@ logs_and_remote() {
   [ "$rc" = 1 ] || fail "TCP without the token was not refused"
 }
 
+# The MCP server over stdio: `androidctl mcp` runs it in the container
+# (podman exec) against the daemon's socket. The check needs the Python
+# environment of the repository for the MCP client (scripts/dev-venv.sh).
+mcp_stdio() {
+  local python=$repo/.venv/bin/python
+  if [ ! -x "$python" ]; then
+    info "no $python: the MCP check is skipped (run scripts/dev-venv.sh)"
+    return 0
+  fi
+  "$python" - "$dir/bin/androidctl" <<'PY' >"$work/mcp.out" 2>&1 || fail "the MCP client failed: $(tail -n 20 "$work/mcp.out")"
+import asyncio, json, sys
+from mcp import Client
+from mcp.client.stdio import StdioServerParameters
+
+async def main():
+    async with Client(StdioServerParameters(command=sys.argv[1], args=["mcp"])) as c:
+        names = {t.name for t in (await c.list_tools()).tools}
+        assert {"android_status", "android_tap", "android_ui", "android_screenshot"} <= names, names
+        r = await c.call_tool("android_status", {})
+        assert not r.is_error and json.loads(r.content[0].text)["state"] == "running", r.content
+        r = await c.call_tool("android_ui", {})
+        assert not r.is_error and "center=" in r.content[0].text, r.content
+        r = await c.call_tool("android_screenshot", {"max_size": 400})
+        assert not r.is_error and r.content[0].type == "image" and r.content[1].text.startswith("device "), r.content
+        r = await c.call_tool("android_launch", {"package": "no.such.app"})
+        assert r.is_error and "(not_found)" in r.content[0].text, r.content
+        print("mcp ok")
+
+asyncio.run(main())
+PY
+  grep -q '^mcp ok$' "$work/mcp.out" || fail "the MCP check printed no result: $(tail -n 5 "$work/mcp.out")"
+}
+
 # What the container keeps from Android and what it does not (the section
 # "What the guest can reach" of docs/ARCHITECTURE.md).
 guest_reach() {
@@ -475,6 +508,7 @@ step "text into a focused field" text_entry
 step "push, pull, ls" files
 step "install an APK" apps
 step "logs, token, remote mode" logs_and_remote
+step "mcp over stdio" mcp_stdio
 step "what the guest reaches" guest_reach
 step "stop and cold start keep userdata" stop_start_keeps_data
 step "container recreation keeps userdata" recreate_container

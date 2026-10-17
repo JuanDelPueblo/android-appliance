@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # run-tests.sh: run every test suite that needs no emulator.
 #
-# It runs ShellCheck, the bash tests of v2 and of the v1 scripts, the
-# Python tests (in the .venv of scripts/dev-venv.sh), the tests of the web
-# dashboard (web/), the Hermes plugin tests and the v1 dashboard tests, and
-# reports a clear SKIP when a tool is not installed.
+# It runs ShellCheck, the bash tests of install.sh and androidctl, the
+# Python tests (in the .venv of scripts/dev-venv.sh) and the tests of the
+# web dashboard (web/), and reports a clear SKIP when a tool is not
+# installed.
 set -uo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -32,8 +32,7 @@ run() {
 }
 
 if command -v shellcheck >/dev/null 2>&1; then
-  scripts=(bin/androidctl install.sh legacy/*.sh scripts/*.sh tests/*.sh tests/e2e/*.sh
-    src/androidctl src/avd-init src/appliance-env src/emulator-launch src/display-scrcpy)
+  scripts=(bin/androidctl install.sh scripts/*.sh tests/*.sh tests/e2e/*.sh)
   for file in tests/fakes/*; do
     case $file in *.py) ;; *) scripts+=("$file") ;; esac
   done
@@ -42,25 +41,13 @@ else
   echo "SKIP shellcheck (not installed)"
 fi
 
-for suite in tests/*-test.sh legacy/*-test.sh; do
+for suite in tests/*-test.sh; do
   if [ "$suite" = tests/androidctl-v2-test.sh ] && ! command -v python3 >/dev/null 2>&1; then
     echo "SKIP $suite (python3 runs its fake appliance API)"
     continue
   fi
   run "$suite" bash "$suite"
 done
-
-if command -v python3 >/dev/null 2>&1; then
-  python3 -m py_compile src/display-idle
-  report "display-idle compiles" $?
-  if python3 -c 'import aiohttp, fastapi, httpx, yaml' 2>/dev/null; then
-    run "test_plugin.py" python3 -m unittest discover -s tests -p test_plugin.py -v
-  else
-    echo "SKIP test_plugin.py (python modules missing; on Fedora run: dnf install python3-aiohttp python3-fastapi python3-httpx python3-pyyaml)"
-  fi
-else
-  echo "SKIP androidctl-v2-test.sh, display-idle and test_plugin.py (python3 not installed)"
-fi
 
 if [ ! -d tests/python ]; then
   echo "SKIP tests/python (the directory is missing)"
@@ -93,14 +80,6 @@ if command -v node >/dev/null 2>&1; then
   fi
 else
   echo "SKIP tests/web (node not installed)"
-fi
-
-if command -v node >/dev/null 2>&1; then
-  node --check dashboard/dist/index.js &&
-    node --test tests/dashboard-test.js
-  report "dashboard-test.js" $?
-else
-  echo "SKIP dashboard-test.js (node not installed)"
 fi
 
 exit "$status"

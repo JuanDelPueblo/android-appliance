@@ -1256,12 +1256,30 @@ appliance is installed.
 
 ## Migration from v1
 
-The migration adopts the v1 state directory in place (default) or copies
-it, keeps the AVD, the adb keys and the configuration values, and leaves
-the v1 registry file untouched. It stops v1 and disables its units (this
-part needs root for the system units), records a manifest and a backup of
-the small files, and can roll back: stop v2, restore SELinux labels with
-`restorecon`, re-enable v1. Details are in the migration guide.
+`install.sh --migrate` moves a v1 appliance (system units, state in
+`/var/lib/...`) to v2 on the same state directory. It reads
+`/etc/android-appliance/appliance.conf`, writes the v2 configuration
+from it (state directory, AVD name, API level, memory, cores, disk, idle
+stop, the display port as `APPLIANCE_PORT`, `host` rendering stays
+`host`, anything else becomes `auto`), and records a manifest
+`<name>.migration` next to the configuration: the v1 state directory,
+its owner and which v1 units were enabled. The state is adopted in
+place: the AVD, userdata, accounts and adb keys stay where they are, and
+the v1 registry `avd/<name>.ini` is not touched (see Persistent state).
+
+The steps that need root are printed, and run through `sudo` only when
+the user agrees at an interactive prompt: `chown` of the state when v1
+ran as another user, and `systemctl disable --now` of the v1 units. The
+units stay installed, disabled. v2 is installed once they are done
+(`install.sh --migrate` again, or plain `install.sh`); with the manifest
+present, `check_v1` accepts the shared state and only requires the v1
+units to be inactive.
+
+`install.sh --migrate-back` stops v2, removes its unit and the state
+marker, keeps the configuration, the manifest and the images, and prints
+the root steps that bring v1 back: `restorecon -R` on the state (the
+container relabelled it), `chown` back to the v1 owner, and
+`systemctl enable --now` of the units that were enabled.
 
 ## Testing
 

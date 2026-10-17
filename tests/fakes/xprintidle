@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-[ -e "$FAKE/xidle" ] || exit 1
-cat "$FAKE/xidle"

@@ -13,7 +13,7 @@
 # The configuration file (default ~/.config/android-appliance/appliance.conf)
 # is created from conf/appliance.conf.example when it is missing. Edit it
 # and run the installer again to apply a change; it is idempotent. The
-# v1 installer (system units, no container) is legacy/install.sh.
+# v1 installer (system units, no container) is in the git history before v2.
 # APPLIANCE_INSTALL_WAIT=SECONDS sets how long it waits for the daemon
 # after the restart (default 60).
 set -euo pipefail
@@ -26,6 +26,8 @@ usage: install.sh [--config FILE] [--no-build] [--no-start] [--root DIR]
        install.sh --rollback [--config FILE] [--no-start] [--root DIR]
        install.sh --uninstall [--purge] [--config FILE] [--root DIR]
        install.sh --print-run [--config FILE] [--no-build] [--root DIR]
+       install.sh --migrate [--config FILE] [--no-build] [--no-start] [--root DIR]
+       install.sh --migrate-back [--config FILE] [--root DIR]
        install.sh --doctor [--config FILE]
 
   --config FILE  the configuration file of the instance
@@ -37,6 +39,12 @@ usage: install.sh [--config FILE] [--no-build] [--no-start] [--root DIR]
   --purge        with --uninstall: also delete the state directory (all
                  apps and data of Android) and the configuration
   --print-run    install without systemd, and print the podman run command
+  --migrate      move a v1 appliance (system units) to v2: write the v2
+                 configuration from /etc/android-appliance/appliance.conf,
+                 adopt its state directory in place, install v2. The v1
+                 units must be stopped first; the commands are printed
+  --migrate-back stop v2 and print the commands that bring v1 back on the
+                 same state
   --doctor       check the host (androidctl doctor)
   --root DIR     stage every file under DIR; run no podman or systemctl
 EOF
@@ -74,7 +82,7 @@ while [ $# -gt 0 ]; do
       start=0
       shift
       ;;
-    --rollback | --uninstall | --doctor | --print-run)
+    --rollback | --uninstall | --doctor | --print-run | --migrate | --migrate-back)
       [ "$action" = install ] || usage_error "$1 does not combine with --$action"
       action=${1#--}
       shift
@@ -213,6 +221,7 @@ load_settings() {
   unit_file=$quadlet_dir/$name.container
   override_file=$config_dir/$name.containers.conf
   images_file=$config_dir/$name.images
+  migration_file=$config_dir/$name.migration
   runtime_dir=$runtime_base/$name
 }
 
@@ -298,6 +307,12 @@ check_v1() {
   local v1_state v1_port
   v1_state=$(realpath -m -s -- "$(v1_setting APPLIANCE_STATE_DIR /var/lib/android-appliance)")
   v1_port=$(v1_setting APPLIANCE_DISPLAY_PORT 6090)
+  if [ -f "$root$migration_file" ] && [ "$(config_value "$root$migration_file" V1_STATE_DIR "")" = "$v1_state" ]; then
+    # This instance took the v1 state over (--migrate). v1 stays installed
+    # but disabled, for --migrate-back; it must not run at the same time.
+    require_v1_stopped
+    return 0
+  fi
   if overlaps "$state_dir" "$v1_state"; then
     die "a v1 appliance uses $v1_state ($v1_unit); set APPLIANCE_STATE_DIR in $config_file to a separate directory"
   fi
@@ -310,6 +325,166 @@ check_v1() {
 # Devices: /dev/kvm always, the render node unless lavapipe. The user
 # reaches a device that is not world-accessible through its groups,
 # which the container keeps only with keep-groups.
+# The v1 appliance: the system units that the v1 installer wrote, and a
+# state directory with the same layout as v2 (avd/, home/.android/).
+v1_units=(android-appliance-idle.timer android-appliance-display.socket android-appliance-emulator.service
+  android-appliance-display.service android-appliance-scrcpy.service android-appliance-xvnc.service android-appliance-idle.service)
+
+v1_unit_active() {
+  # In the staging root nothing runs.
+  [ -z "$root" ] && command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$1" 2>/dev/null
+}
+
+v1_unit_enabled() {
+  if [ -n "$root" ]; then
+    compgen -G "$root/etc/systemd/system/*.wants/$1" >/dev/null
+  else
+    command -v systemctl >/dev/null 2>&1 && systemctl is-enabled --quiet "$1" 2>/dev/null
+  fi
+}
+
+require_v1_stopped() {
+  local unit running=()
+  for unit in "${v1_units[@]}"; do
+    if v1_unit_active "$unit"; then running+=("$unit"); fi
+  done
+  [ "${#running[@]}" = 0 ] ||
+    die "the v1 appliance is running (${running[*]}); it shares the state directory with this instance. Stop it first:"$'\n'"  sudo systemctl disable --now ${v1_units[*]}"
+}
+
+# migrate: v1 to v2 on the same state directory. The v1 configuration
+# becomes the v2 one, the state is adopted in place (the AVD, userdata,
+# accounts and adb keys stay where they are; the v1 registry file is not
+# touched), and the v1 units stay installed but disabled, so that
+# --migrate-back can bring v1 back. The steps that need root (stopping
+# the system units, chown when v1 ran as another user) are printed.
+migrate() {
+  [ -f "$root$v1_conf" ] || die "there is no v1 appliance to migrate: $v1_conf does not exist"
+  [ -e "$root$v1_unit" ] || die "there is no v1 appliance to migrate: $v1_unit does not exist"
+  if [ -f "$root$config_file" ]; then
+    die "$config_file exists already; a migrated or configured instance is not migrated again. To migrate into it anyway, move the file away first"
+  fi
+  local v1_state v1_user v1_gpu gpu owner unit enabled=() steps=() stop_needed=0
+  v1_state=$(realpath -m -s -- "$(v1_setting APPLIANCE_STATE_DIR /var/lib/android-appliance)")
+  v1_user=$(v1_setting APPLIANCE_USER android-appliance)
+  v1_gpu=$(v1_setting APPLIANCE_GPU swiftshader)
+  case $v1_gpu in host) gpu=host ;; *) gpu=auto ;; esac
+  [ -d "$root$v1_state" ] || die "the v1 state directory $v1_state does not exist"
+  [ -d "$root$v1_state/avd" ] || die "$v1_state holds no AVD (no avd/ directory); nothing to migrate"
+  for unit in "${v1_units[@]}"; do
+    if v1_unit_enabled "$unit"; then enabled+=("$unit"); fi
+    if v1_unit_active "$unit" || v1_unit_enabled "$unit"; then stop_needed=1; fi
+  done
+
+  mkdir -p "$root$config_dir"
+  cat >"$root$config_file" <<CONF
+# Configuration of the Android appliance, migrated from the v1
+# configuration $v1_conf on $(date -I). conf/appliance.conf.example
+# documents every key. Edit the file, then run install.sh again.
+APPLIANCE_NAME=android-appliance
+APPLIANCE_STATE_DIR=$v1_state
+APPLIANCE_LISTEN_ADDRESS=127.0.0.1
+APPLIANCE_PORT=$(v1_setting APPLIANCE_DISPLAY_PORT 6090)
+APPLIANCE_TURN_PORT=3478
+APPLIANCE_AVD_NAME=$(v1_setting APPLIANCE_AVD_NAME android)
+APPLIANCE_API_LEVEL=$(v1_setting APPLIANCE_API_LEVEL 36)
+APPLIANCE_GPU=$gpu
+APPLIANCE_IDLE_STOP_MINUTES=$(v1_setting APPLIANCE_IDLE_STOP_MINUTES 60)
+APPLIANCE_MEMORY_MIB=$(v1_setting APPLIANCE_MEMORY_MIB 4096)
+APPLIANCE_CORES=$(v1_setting APPLIANCE_CORES 4)
+APPLIANCE_DISK_SIZE=$(v1_setting APPLIANCE_DISK_SIZE 32G)
+CONF
+  chmod 0600 "$root$config_file"
+  read_config
+  load_settings
+  # The manifest tells check_v1 that the shared state is intended, and
+  # --migrate-back what to bring back.
+  owner=$(stat -c %U "$root$v1_state" 2>/dev/null || echo "$user")
+  cat >"$root$migration_file" <<MANIFEST
+# Managed by install.sh --migrate on $(date -I). install.sh --migrate-back reads it.
+V1_CONFIG=$v1_conf
+V1_STATE_DIR=$v1_state
+V1_USER=$v1_user
+V1_OWNER=$owner
+V1_ENABLED=${enabled[*]}
+MANIFEST
+  chmod 0600 "$root$migration_file"
+  echo "install.sh: wrote $config_file from $v1_conf (API $api, $gpu rendering, port $port, state $state_dir)"
+  echo "install.sh: wrote $migration_file"
+
+  if [ "$owner" != "$user" ]; then
+    steps+=("sudo chown -R $user: $v1_state")
+  fi
+  if [ "$stop_needed" = 1 ]; then steps+=("sudo systemctl disable --now ${v1_units[*]}"); fi
+  if [ "${#steps[@]}" != 0 ]; then
+    echo "install.sh: these steps need root; run them, then run install.sh --config $config_file to install v2:"
+    printf '  %s\n' "${steps[@]}"
+    if [ -z "$root" ] && [ -t 0 ] && command -v sudo >/dev/null 2>&1; then
+      local answer step
+      read -r -p "install.sh: run them now with sudo? [y/N] " answer
+      if [[ $answer =~ ^[Yy] ]]; then
+        for step in "${steps[@]}"; do
+          echo "install.sh: $step"
+          eval "$step" || die "the step failed: $step"
+        done
+        steps=()
+      fi
+    fi
+  fi
+  if [ "${#steps[@]}" != 0 ]; then
+    echo "install.sh: v1 is still in place; install.sh --config $config_file installs v2 once the steps are done"
+    return 0
+  fi
+  echo "install.sh: installing v2 on the v1 state"
+  install_appliance
+  echo "install.sh: the v1 units are disabled and kept for install.sh --migrate-back; the v1 registry $v1_state/avd/*.ini is untouched"
+}
+
+# migrate_back: stop v2 and remove its unit; the state and the v2
+# configuration stay (install.sh installs v2 again). The steps that
+# bring v1 back need root and are printed: SELinux labels of the state
+# (the container relabelled it), ownership, and the units.
+migrate_back() {
+  [ -f "$root$config_file" ] || die "the configuration file $config_file does not exist; give the --config of the migrated instance"
+  read_config
+  load_settings
+  [ -f "$root$migration_file" ] || die "$migration_file does not exist: this instance was not migrated from v1 with install.sh --migrate"
+  local v1_state v1_owner v1_enabled steps=()
+  v1_state=$(config_value "$root$migration_file" V1_STATE_DIR "")
+  v1_owner=$(config_value "$root$migration_file" V1_OWNER "$user")
+  v1_enabled=$(config_value "$root$migration_file" V1_ENABLED "")
+  [ "$v1_state" = "$state_dir" ] || die "the state directory moved since the migration ($v1_state, now $state_dir); nothing was changed"
+  if [ -z "$root" ] && command -v systemctl >/dev/null 2>&1 && [ "$(systemctl --user show -p LoadState --value "$unit" 2>/dev/null)" = loaded ]; then
+    echo "install.sh: stopping $unit"
+    systemctl --user stop "$unit" || die "$unit did not stop; see: journalctl --user -u $unit"
+  fi
+  if [ -f "$root$unit_file" ]; then
+    grep -q '^# Managed by install.sh' "$root$unit_file" || die "$unit_file exists, and install.sh did not write it; nothing was removed"
+    check_unit_owner
+    rm -f "$root$unit_file"
+    if [ -z "$root" ] && command -v systemctl >/dev/null 2>&1; then
+      systemctl --user daemon-reload
+      systemctl --user reset-failed "$unit" 2>/dev/null || true
+    fi
+  fi
+  if [ "$(state_owner "$state_dir")" = "$name" ]; then rm -f "$root$state_dir/$state_marker"; fi
+  rm -rf "${root}${runtime_dir:?}"
+  echo "install.sh: removed the v2 unit $unit; kept $config_file, $migration_file and the images (install.sh --config $config_file installs v2 again)"
+  if [ -n "$root" ] || command -v restorecon >/dev/null 2>&1; then
+    steps+=("sudo restorecon -R $v1_state")
+  fi
+  if [ "$v1_owner" != "$user" ]; then
+    steps+=("sudo chown -R $v1_owner: $v1_state")
+  fi
+  if [ -n "$v1_enabled" ]; then
+    steps+=("sudo systemctl enable --now $v1_enabled")
+  fi
+  if [ "${#steps[@]}" != 0 ]; then
+    echo "install.sh: these steps bring v1 back and need root:"
+    printf '  %s\n' "${steps[@]}"
+  fi
+}
+
 detect_devices() {
   local node mode
   render=
@@ -825,7 +1000,7 @@ uninstall() {
   fi
   if [ -n "$current_image" ] && [ "$current_built" = 1 ]; then remove_image "$current_image"; fi
   if [ -n "$previous_image" ] && [ "$previous_built" = 1 ]; then remove_image "$previous_image"; fi
-  rm -f "$root$override_file" "$root$images_file"
+  rm -f "$root$override_file" "$root$images_file" "$root$migration_file"
   rm -rf "${root}${runtime_dir:?}"
   local link=$root$bin_dir/androidctl
   if [ -L "$link" ] && ours_androidctl "$link"; then rm -f "$link"; fi
@@ -851,4 +1026,6 @@ uninstall() {
 case $action in
   install | rollback | print-run) install_appliance ;;
   uninstall) uninstall ;;
+  migrate) migrate ;;
+  migrate-back) migrate_back ;;
 esac
