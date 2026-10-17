@@ -355,12 +355,15 @@ mcp_stdio() {
     return 0
   fi
   "$python" - "$dir/bin/androidctl" <<'PY' >"$work/mcp.out" 2>&1 || fail "the MCP client failed: $(tail -n 20 "$work/mcp.out")"
-import asyncio, json, sys
+import asyncio, json, os, sys
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 
 async def main():
-    async with Client(StdioServerParameters(command=sys.argv[1], args=["mcp"])) as c:
+    # The SDK starts the server with a minimal environment by default;
+    # androidctl needs ANDROID_APPLIANCE_CONFIG and XDG_RUNTIME_DIR to find this instance.
+    params = StdioServerParameters(command=sys.argv[1], args=["mcp"], env=dict(os.environ))
+    async with Client(params) as c:
         names = {t.name for t in (await c.list_tools()).tools}
         assert {"android_status", "android_tap", "android_ui", "android_screenshot"} <= names, names
         r = await c.call_tool("android_status", {})
