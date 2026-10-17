@@ -40,10 +40,19 @@ async def _chunks(path: Path) -> AsyncIterator[bytes]:
 
 
 class Client:
-    def __init__(self, socket_path: str | None = None, url: str | None = None, token: str | None = None):
-        if (socket_path is None) == (url is None):
+    def __init__(
+        self,
+        socket_path: str | None = None,
+        url: str | None = None,
+        token: str | None = None,
+        transport: httpx2.AsyncBaseTransport | None = None,
+    ):
+        """Connect over the unix socket, over TCP with the token, or (tests)
+        over a given transport such as an ASGI transport to the app."""
+        if transport is None and (socket_path is None) == (url is None):
             raise ValueError("give either socket_path or url")
-        transport = httpx2.AsyncHTTPTransport(uds=socket_path) if socket_path else None
+        if transport is None and socket_path:
+            transport = httpx2.AsyncHTTPTransport(uds=socket_path)
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         # No client timeout: the daemon bounds every operation itself.
         self._http = httpx2.AsyncClient(

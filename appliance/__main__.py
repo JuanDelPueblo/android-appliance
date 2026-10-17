@@ -1,4 +1,4 @@
-"""python3 -m appliance serve | healthcheck | check-config"""
+"""python3 -m appliance serve | healthcheck | check-config | mcp"""
 
 import argparse
 import asyncio
@@ -164,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("serve", help="run the daemon (the container's main process)")
     commands.add_parser("healthcheck", help="exit 0 when the daemon answers on its unix socket")
     commands.add_parser("check-config", help="exit 0 when the configuration is valid (install.sh runs it)")
+    commands.add_parser("mcp", help="serve the MCP tools over stdio, against the daemon's unix socket")
     args = parser.parse_args(argv)
     # The healthcheck runs often; it prints only problems.
     level = logging.INFO if args.command == "serve" else logging.WARNING
@@ -177,6 +178,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "serve":
         return asyncio.run(serve(cfg))
+    if args.command == "mcp":
+        from . import mcp_server
+
+        asyncio.run(mcp_server.serve_stdio(cfg.socket_path))
+        return 0
     try:
         return 0 if asyncio.run(_health(cfg)) else 1
     except Exception as e:

@@ -1229,15 +1229,30 @@ Rules of `install.sh`:
 
 ## MCP
 
-The MCP server uses the official Python SDK. Over HTTP it is mounted at
-`/mcp` in the daemon (streamable HTTP, bearer token). Over stdio,
-`androidctl mcp` runs `podman exec -i <name> python3 -m appliance mcp`,
-which uses `client` against the unix socket. Both serve the same tools,
-built on `backend`. Screenshots are image content (base64); the UI
-hierarchy and command output are text; files are base64 content, so
-remote agents need no shared filesystem. Tools that can wait for a boot
-send progress notifications and stop waiting after a bound, returning
-the current state, so clients with short timeouts keep working.
+The MCP server (`appliance/mcp_server.py`, on the official Python SDK)
+serves the backend operations as tools over stdio. `androidctl mcp` runs
+`podman exec -i <name> /opt/appliance/venv/bin/python -m appliance mcp`,
+which talks to the daemon over its unix socket (`client`); the host needs
+no Python, and an agent configuration is just the command `androidctl mcp`.
+There is no MCP over HTTP: a remote agent runs `androidctl` with
+`ANDROID_APPLIANCE_URL` for the HTTP API, or an MCP client where the
+appliance is installed.
+
+- Tool names start with `android_`: lifecycle (`status`, `start`, `stop`,
+  `restart`, `wait`), `screenshot`, `ui`, input (`tap`, `long_press`,
+  `swipe`, `text`, `key`), `shell`, apps (`apps`, `launch`, `force_stop`,
+  `install`, `uninstall`), files (`ls`, `pull`, `push`) and `logs`.
+- Screenshots are image content (JPEG by default, scaled to `max_size`)
+  with the device size and the scale as text; the UI hierarchy is one
+  actionable element per line with its center (or JSON, or the XML);
+  files travel inline (UTF-8 text, or base64) with size limits, so an
+  agent needs no shared filesystem.
+- The lifecycle tools wait for a boot with progress notifications and
+  stop after a bound (`timeout`, 300 s by default), returning the current
+  state with a note, so clients with short timeouts keep working.
+- The daemon's error codes come back as tool errors (`message (code)`);
+  the arguments are validated by the SDK before anything reaches the
+  device.
 
 ## Migration from v1
 

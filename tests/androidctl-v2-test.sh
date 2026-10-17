@@ -47,6 +47,7 @@ echo "podman $*" >>"$T/podman.calls"
 case $1 in
   info) echo "true crun v2" ;;
   image) [ -e "$T/image-exists" ] ;;
+  exec) cat >"$T/podman.exec.stdin" ;;
   container)
     case "$*" in
       *State.Running*) if [ -e "$T/container-running" ]; then echo true; else exit 1; fi ;;
@@ -535,11 +536,25 @@ t_v1_internal_commands_are_gone() {
   [ ! -e "$T/api/calls" ]
 }
 
-t_mcp_is_not_available_yet() {
-  # The daemon has no MCP server yet: say so, and do not advertise it.
+t_mcp_execs_the_server_in_the_container() {
+  echo '{"jsonrpc":"2.0"}' | ctl mcp
+  grep -qxF 'podman exec -i android-appliance /opt/appliance/venv/bin/python -m appliance mcp' "$T/podman.calls"
+  grep -qxF '{"jsonrpc":"2.0"}' "$T/podman.exec.stdin"
+  grep -q '^  mcp ' <(ctl help)
+}
+
+t_mcp_starts_the_unit_first() {
+  stop_api
+  touch "$T/unit-exists"
+  ctl mcp </dev/null
+  grep -qxF 'systemctl --user start android-appliance.service' "$T/systemctl.calls"
+  grep -qxF 'podman exec -i android-appliance /opt/appliance/venv/bin/python -m appliance mcp' "$T/podman.calls"
+}
+
+t_mcp_refuses_a_remote_url() {
+  export ANDROID_APPLIANCE_URL=http://127.0.0.1:1
   [ "$(status_of ctl mcp)" = 1 ]
-  grep -qx 'androidctl: mcp is not available in this version: the daemon has no MCP server yet' "$T/stderr"
-  not grep -q mcp <(ctl help)
+  grep -q 'not available over ANDROID_APPLIANCE_URL' "$T/stderr"
   [ ! -e "$T/podman.calls" ]
 }
 

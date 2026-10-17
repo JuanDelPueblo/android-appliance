@@ -95,6 +95,7 @@ command does not read standard input: use push for data.
 Appliance:
   logs [emulator|daemon] [-n N] print the last log lines
   token [--rotate]              print the API token, or replace it
+  mcp                           serve the MCP tools over stdio (for AI agents)
   doctor                        check the host and the appliance
   version                       print the versions
 EOF
@@ -574,9 +575,18 @@ cmd_version() {
   fi
 }
 
-# The daemon has no MCP server yet (docs/ARCHITECTURE.md describes it).
+# MCP over stdio: the server runs in the container against the daemon's
+# unix socket, so the host needs no Python. The agent runs `androidctl mcp`.
 cmd_mcp() {
-  die "mcp is not available in this version: the daemon has no MCP server yet"
+  [ "$#" = 0 ] || usage_error
+  [ -z "$remote_url" ] || die "mcp runs the MCP server in the local container; it is not available over ANDROID_APPLIANCE_URL"
+  if [ "$in_container" = 1 ]; then
+    rm -rf "$tmp"
+    exec python3 -m appliance mcp
+  fi
+  api_answers || recover
+  rm -rf "$tmp"
+  exec podman exec -i "$name" /opt/appliance/venv/bin/python -m appliance mcp
 }
 
 doctor_failures=0
