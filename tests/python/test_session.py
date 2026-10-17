@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 from appliance import api, session, webrtc
+from appliance import turn as turn_module
 from appliance.auth import Auth
 from appliance.backend import Backend, LogBuffer
 from appliance.session import Hub
@@ -1082,3 +1083,88 @@ async def test_rotating_the_token_ends_the_open_sessions(cfg, fake):
                 assert again.accepted
             async with WebSocketClient(d.app, headers={"authorization": "Bearer old"}) as old:
                 assert not old.accepted
+
+
+# Hardening (Phase 3 review)
+
+
+async def test_token_rotation_also_rotates_the_turn_secret_and_restarts_turnserver(cfg, fake):
+    """A browser keeps its TURN credential: after a rotation it must not work."""
+    async with daemon(cfg) as d:
+        await d.running()
+        await eventually(lambda: fake.turn_starts())
+        async with d.client() as ws:
+            [server] = (await watch(ws, d))["iceServers"]
+            before = (cfg.secrets_dir / "turn-secret").read_text().strip()
+            assert username_ok(before, server["username"], server["credential"])
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.local(d.app)), base_url="http://a") as http:
+                assert (await http.post("/api/v1/auth/token/rotate")).status_code == 200
+            await ws.closed()
+        after = (cfg.secrets_dir / "turn-secret").read_text().strip()
+        assert after != before and not username_ok(after, server["username"], server["credential"])
+        # turnserver runs again, with the new secret: every allocation is gone.
+        await eventually(lambda: len(fake.turn_starts()) == 2 and d.turn.running)
+
+
+async def test_a_session_keeps_one_turn_user_name(cfg, fake):
+    """user-quota is a quota per user name: a session must not get a new
+    name (and a new quota) for every stream it starts."""
+    async with daemon(cfg) as d, d.client() as ws, d.client() as other:
+        await d.running()
+        first = (await watch(ws, d))["iceServers"][0]
+        second = (await watch(ws, d))["iceServers"][0]
+        assert first["username"] == second["username"] and first["credential"] == second["credential"]
+        assert (await watch(other, d))["iceServers"][0]["username"] != first["username"]
+
+
+def test_a_turn_user_name_is_renewed_before_it_expires():
+    user = turn_module.new_user(now=1_000_000)
+    assert turn_module.renew_user(user, now=1_000_000) == user
+    assert turn_module.renew_user(user, now=1_000_000 + turn_module.CREDENTIAL_TTL - turn_module.RENEW_BEFORE + 1) != user
+    assert turn_module.renew_user(None, now=1_000_000).startswith(str(1_000_000 + turn_module.CREDENTIAL_TTL))
+    assert turn_module.renew_user("garbage", now=1_000_000) != "garbage"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"type": "key", "key": "a", "action": []},
+        {"type": "touch", "touches": [{"id": 1, "x": 10**400, "y": 1, "pressure": 1}]},
+        "[" * 100_000,
+    ],
+)
+async def test_hostile_values_get_an_error_not_a_dead_session(cfg, fake, message):
+    async with daemon(cfg) as d, d.client() as ws:
+        await d.running()
+        await ws.send(message)
+        assert (await ws.of_type("error"))["code"] == "bad_request"
+        await ws.send({"type": "ping", "t": 1})
+        assert (await ws.of_type("pong"))["t"] == 1
+
+
+async def test_the_pong_echo_is_bounded(cfg, fake):
+    async with daemon(cfg) as d, d.client() as ws:
+        await ws.send({"type": "ping", "t": "x" * 200_000})
+        assert (await ws.of_type("error"))["code"] == "bad_request"
+        await ws.send({"type": "ping", "t": "short"})
+        assert (await ws.of_type("pong"))["t"] == "short"
+        await ws.send({"type": "ping"})
+        assert (await ws.of_type("pong"))["t"] is None
+
+
+async def test_a_session_holds_a_bounded_number_of_keys(cfg, fake):
+    async with daemon(cfg) as d, d.client() as ws:
+        await d.running()
+        # Named keys are held until their up (a character is one key press).
+        names = [f"F{i}" for i in range(1, 25)] + ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", "Enter"]
+        for name in names[: session.MAX_HELD]:
+            await ws.send({"type": "key", "key": name, "action": "down"})
+        assert await ws.quiet(0.3) == []
+        await ws.send({"type": "key", "key": names[session.MAX_HELD], "action": "down"})
+        error = await ws.of_type("error")
+        assert error["code"] == "bad_request" and str(session.MAX_HELD) in error["message"]
+        # A key that is already down can repeat, and a released key frees a slot.
+        await ws.send({"type": "key", "key": names[0], "action": "down"})
+        await ws.send({"type": "key", "key": names[1], "action": "up"})
+        await ws.send({"type": "key", "key": names[session.MAX_HELD], "action": "down"})
+        assert await ws.quiet(0.3) == []

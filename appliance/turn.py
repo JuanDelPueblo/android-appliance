@@ -16,7 +16,7 @@ import re
 import secrets
 import time
 
-from .auth import secret
+from .auth import _write_secret, secret
 from .config import TURN_PORT, Config
 
 log = logging.getLogger(__name__)
@@ -42,11 +42,30 @@ LOG_LINES = 100
 LOG_WINDOW = 60.0
 
 
-def credentials(key: str, ttl: int = CREDENTIAL_TTL, now: float | None = None) -> tuple[str, str]:
+# A session keeps one user name, so that user-quota is a quota per session:
+# fresh names on every stream start would let one session hold every relay.
+# The name is replaced when its credential has less than this left.
+RENEW_BEFORE = 3600
+
+
+def new_user(ttl: int = CREDENTIAL_TTL, now: float | None = None) -> str:
+    """A TURN REST API user name: it carries its expiry."""
+    expiry = int((time.time() if now is None else now) + ttl)
+    return f"{expiry}:{secrets.token_hex(8)}"
+
+
+def renew_user(user: str | None, now: float | None = None) -> str:
+    """`user`, unless it is missing or expires soon."""
+    now = time.time() if now is None else now
+    if user and (expiry := user.partition(":")[0]).isdigit() and int(expiry) - now > RENEW_BEFORE:
+        return user
+    return new_user(now=now)
+
+
+def credentials(key: str, user: str | None = None, ttl: int = CREDENTIAL_TTL, now: float | None = None) -> tuple[str, str]:
     """A TURN REST API credential: the user name carries its expiry, and
     the password is an HMAC of it that coturn can check with the secret."""
-    expiry = int((time.time() if now is None else now) + ttl)
-    username = f"{expiry}:{secrets.token_hex(8)}"
+    username = user or new_user(ttl, now)
     digest = hmac.new(key.encode(), username.encode(), hashlib.sha1).digest()
     return username, base64.b64encode(digest).decode()
 
@@ -124,13 +143,23 @@ class Turn:
     def running(self) -> bool:
         return self._proc is not None and self._proc.returncode is None
 
-    def ice_servers(self, host: str) -> list[dict[str, object]]:
-        """The ICE servers for a browser: new credentials for each call.
-        `host` is the name of the page, unless the configuration names one."""
+    def ice_servers(self, host: str, user: str | None = None) -> list[dict[str, object]]:
+        """The ICE servers for a browser, with the credential of `user` (a
+        name from `new_user`; a fresh one without). `host` is the name of
+        the page, unless the configuration names one."""
         if not (name := self.cfg.turn_host or host):
             raise ValueError("the Host header of the request is not a host name; set APPLIANCE_TURN_HOST")
-        username, credential = credentials(self._secret)
+        username, credential = credentials(self._secret, user)
         return [{"urls": urls(name, self.cfg.turn_port), "username": username, "credential": credential}]
+
+    async def rotate(self) -> None:
+        """Replace the secret and restart turnserver: every credential that
+        was issued stops working, and every relay allocation is dropped."""
+        self._secret = secrets.token_urlsafe(32)
+        _write_secret(self.cfg.secrets_dir / "turn-secret", self._secret)
+        if self._task is not None:
+            await self.stop()
+            await self.start()
 
     async def start(self) -> None:
         """Start turnserver; a failure is logged and tried again."""

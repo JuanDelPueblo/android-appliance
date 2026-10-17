@@ -113,6 +113,7 @@ class Stream:
         self._on_message = on_message
         self._on_end = on_end
         self._guid = ""
+        self._request: asyncio.Future[str] | None = None
         self._pump: asyncio.Task[None] | None = None
         self._release: asyncio.Task[None] | None = None
         self._offer: asyncio.Future[str] = asyncio.get_running_loop().create_future()
@@ -126,9 +127,32 @@ class Stream:
     async def open(self) -> None:
         """Ask the emulator for the stream. Its messages follow through
         `on_message`, from the next time that the caller waits."""
-        self._guid = await self._grpc.request_rtc_stream(STUN_URL)
+        self._request = asyncio.ensure_future(self._grpc.request_rtc_stream(STUN_URL))
+        try:
+            self._guid = await asyncio.shield(self._request)
+        except asyncio.CancelledError:
+            # The viewer left while the emulator was creating the stream. The
+            # emulator may still make it, and would hold it for good: wait
+            # for its id and let it go.
+            self.live = False
+            self._release = asyncio.create_task(self._let_go_late())
+            raise
         log.info("stream %s requested", self._guid)
         self._pump = asyncio.create_task(self._receive())
+        if not self.live:
+            # Closed while the request was in flight.
+            self._release = asyncio.create_task(self._let_go())
+
+    async def _let_go_late(self) -> None:
+        assert self._request
+        try:
+            self._guid = await self._request
+        except GRPC_ERRORS:
+            self._bridge.forget(self)
+            return
+        log.info("stream %s requested by a viewer that left; releasing it", self._guid)
+        self._pump = asyncio.create_task(self._receive())
+        await self._let_go()
 
     async def send(self, message: dict[str, Any]) -> None:
         """Pass the viewer's answer or candidate on to the emulator."""
@@ -149,15 +173,17 @@ class Stream:
         self.live = False
         if self._pump is not None and not self._pump.done():
             self._release = asyncio.create_task(self._let_go())
+        elif self._request is not None and not self._request.done():
+            pass  # open() releases the stream once the emulator answers
         else:
             self._bridge.forget(self)
 
     async def aclose(self) -> None:
         self.close()
-        for task in (self._release, self._pump):
-            if task is not None:
-                task.cancel()
-        await asyncio.gather(*(t for t in (self._release, self._pump) if t), return_exceptions=True)
+        tasks = [t for t in (self._release, self._pump, self._request) if t is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         self._bridge.forget(self)
 
     async def _let_go(self) -> None:

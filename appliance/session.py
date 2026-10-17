@@ -26,7 +26,7 @@ from .backend import Backend, OperationError
 from .config import HEIGHT, WIDTH
 from .grpc_client import EmulatorGrpc, pb
 from .supervisor import LifecycleError, State
-from .turn import Turn
+from .turn import Turn, renew_user
 from .webrtc import GRPC_ERRORS, Bridge, Stream, StreamLimit
 
 log = logging.getLogger(__name__)
@@ -39,6 +39,8 @@ MAX_TEXT = 64 * 1024
 MAX_SDP = 64 * 1024
 MAX_TOUCHES = input.MAX_CONTACTS
 OUTBOX = 512
+# Keys (and buttons) one session can hold down at once; releasing them on close is paced.
+MAX_HELD = 32
 LANE = 256
 # Messages per second (a pointer sends about 120): more closes the session.
 RATE = 1500
@@ -123,8 +125,12 @@ class Lane:
 
 def number(message: dict[str, Any], key: str) -> float:
     value = message.get(key)
-    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
-        raise bad(f"'{key}' must be a number")
+    try:
+        if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+            raise bad(f"'{key}' must be a number")
+    except OverflowError:
+        # An integer beyond the range of a float.
+        raise bad(f"'{key}' must be a number") from None
     return value
 
 
@@ -143,7 +149,7 @@ def string(message: dict[str, Any], key: str, limit: int) -> str:
 
 def choice(message: dict[str, Any], key: str, options: tuple[str, ...] | dict[str, Any]) -> str:
     value = message.get(key)
-    if value not in options:
+    if not isinstance(value, str) or value not in options:
         raise bad(f"'{key}' must be one of: {', '.join(options)}")
     return value  # type: ignore[return-value]
 
@@ -218,6 +224,8 @@ class Session:
         self.host = host
         self.pointers = input.Pointers(self._new_identifier)
         self._outbox: asyncio.Queue[str] = asyncio.Queue(OUTBOX)
+        # One TURN user name per session (see turn.renew_user).
+        self._turn_user: str | None = None
         self._rate = Bucket(RATE, BURST)
         self._errors = Bucket(ERROR_RATE, ERROR_BURST)
         self._stream: Stream | None = None
@@ -317,7 +325,7 @@ class Session:
                 raise bad(f"messages must be JSON text of at most {MAX_MESSAGE} characters")
             try:
                 message = json.loads(text)
-            except ValueError as e:
+            except (ValueError, RecursionError) as e:
                 raise bad("the message is not valid JSON") from e
             kind = message.get("type") if isinstance(message, dict) else None
             handler = self._handlers.get(kind) if isinstance(kind, str) else None
@@ -326,6 +334,10 @@ class Session:
             await handler(message)
         except Reject as e:
             self.error(e.code, str(e))
+        except Exception:
+            # A value the checks did not foresee must not end the session silently.
+            log.exception("a session message could not be handled")
+            self.error("bad_request", "the message could not be handled")
 
     async def _close(self) -> None:
         if self._closed:
@@ -378,7 +390,11 @@ class Session:
         return emulator
 
     async def _ping(self, message: dict[str, Any]) -> None:
-        self.send({"type": "pong", "t": message.get("t")})
+        # The echo is bounded: a number (the sender's clock) or a short text.
+        t = message.get("t")
+        if not (t is None or (isinstance(t, int | float) and not isinstance(t, bool)) or (isinstance(t, str) and len(t) <= 64)):
+            raise bad("'t' must be a number or a short text")
+        self.send({"type": "pong", "t": t})
 
     async def _touch(self, message: dict[str, Any]) -> None:
         raw = message.get("touches")
@@ -473,6 +489,9 @@ class Session:
             await self._paste(plan)
         elif plan is not None:
             if plan.eventType == pb.KeyboardEvent.keydown:
+                if len(self._held) >= MAX_HELD and held not in self._held:
+                    self.error("bad_request", f"at most {MAX_HELD} keys can be held at once")
+                    return
                 up = pb.KeyboardEvent()
                 up.CopyFrom(plan)
                 up.eventType = pb.KeyboardEvent.keyup
@@ -555,7 +574,8 @@ class Session:
             self.error("not_running", "android is not running")
             return
         try:
-            servers = self.hub.turn.ice_servers(self.host)
+            self._turn_user = renew_user(self._turn_user)
+            servers = self.hub.turn.ice_servers(self.host, self._turn_user)
         except ValueError as e:
             self.error("bad_request", str(e))
             return

@@ -557,8 +557,10 @@ class Api:
     async def rotate_token(self, request: Request) -> Response:
         self._local_only(request)
         token = self.auth.rotate()
-        # An open session holds the old token or cookie.
+        # An open session holds the old token or cookie, and its browser a
+        # TURN credential that must stop working too.
         self.hub.end_sessions()
+        await self.hub.turn.rotate()
         log.info("the API token was rotated; dashboard sessions ended")
         return PlainTextResponse(token + "\n") if _as_text(request) else JSONResponse({"token": token})
 

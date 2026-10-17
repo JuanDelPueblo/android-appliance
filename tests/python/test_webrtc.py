@@ -330,3 +330,60 @@ async def test_closing_everything():
     other = bridge.create(emulator, listener.messages.append, listener.ends.append)  # type: ignore[arg-type]
     await bridge.aclose()
     assert bridge.streams == 0 and not s.live and not other.live
+
+
+class SlowEmulator(Emulator):
+    """RequestRtcStream answers when the test says so."""
+
+    def __init__(self, call: Call):
+        super().__init__(call)
+        self.answer = asyncio.Event()
+        self.requests = 0
+
+    async def request_rtc_stream(self, stun_url: str) -> str:
+        self.requests += 1
+        await self.answer.wait()
+        return "guid-late"
+
+
+async def test_a_viewer_that_leaves_during_the_request_still_releases_the_stream(monkeypatch):
+    """The emulator creates the stream although the viewer is gone, and would
+    hold it for good: the bridge waits for its id and sends the throwaway
+    answer, as for any other stream nobody answered."""
+    monkeypatch.setattr(webrtc, "STUCK_AFTER", 1.0)
+    listener = Listener()
+    offer = json.dumps({"type": "offer", "sdp": OFFER})
+    emulator = SlowEmulator(Call([offer, json.dumps({"bye": "disconnected"})], None))
+    bridge = Bridge()
+    s = bridge.create(emulator, listener.messages.append, listener.ends.append)  # type: ignore[arg-type]
+    job = asyncio.create_task(s.open())
+    await asyncio.sleep(0.05)
+    assert emulator.requests == 1
+    # The session drops the stream and cancels its job (a reload, a reconnect).
+    s.close()
+    job.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await job
+    # Nothing is forgotten before the emulator answered: the limit must count it.
+    assert bridge.streams == 1 and not s.live
+    emulator.answer.set()
+    await asyncio.wait_for(s._release, 5)
+    answer = json.loads(emulator.sent[0])
+    assert answer["type"] == "answer" and "a=setup:active" in answer["sdp"]
+    assert bridge.streams == 0 and listener.messages == [] and listener.ends == []
+
+
+async def test_a_stream_closed_during_the_request_is_released_when_it_opens():
+    """close() without a cancellation: open() finishes and lets the stream go."""
+    listener = Listener()
+    emulator = SlowEmulator(Call([json.dumps({"type": "offer", "sdp": OFFER}), json.dumps({"bye": "disconnected"})], None))
+    bridge = Bridge()
+    s = bridge.create(emulator, listener.messages.append, listener.ends.append)  # type: ignore[arg-type]
+    job = asyncio.create_task(s.open())
+    await asyncio.sleep(0.05)
+    s.close()
+    assert bridge.streams == 1
+    emulator.answer.set()
+    await job
+    await asyncio.wait_for(s._release, 5)
+    assert json.loads(emulator.sent[0])["type"] == "answer" and bridge.streams == 0 and listener.messages == []
