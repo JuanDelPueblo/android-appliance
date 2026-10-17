@@ -1,0 +1,8 @@
+{
+  "name": "android-appliance-e2e",
+  "private": true,
+  "description": "Playwright for tests/e2e/webrtc.sh and for the UI tests of the dashboard (tests/web). Run npm ci, then npx playwright install chromium.",
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

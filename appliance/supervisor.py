@@ -34,6 +34,24 @@ LOG_TAIL = 40
 POST_BOOT = ("svc power stayon true", "wm dismiss-keyguard", "settings put secure stylus_handwriting_enabled 0")
 
 
+class _Watched[T]:
+    """A field of the status. Setting a new value tells the subscribers."""
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.attr = f"_{name}"
+
+    def __get__(self, obj: "Supervisor | None", owner: type | None = None) -> T:
+        return self if obj is None else getattr(obj, self.attr)  # type: ignore[return-value]
+
+    def __set__(self, obj: "Supervisor", value: T) -> None:
+        if getattr(obj, self.attr, _UNSET) != value:
+            setattr(obj, self.attr, value)
+            obj._changed()
+
+
+_UNSET = object()
+
+
 class State(enum.StrEnum):
     STOPPED = "stopped"
     STARTING = "starting"
@@ -118,18 +136,28 @@ def _exit_text(code: int) -> str:
 
 
 class Supervisor:
+    # The status fields that subscribers hear about.
+    state = _Watched[State]()
+    phase = _Watched[str | None]()
+    gpu = _Watched[str | None]()
+    api_level = _Watched[int | None]()
+    # Dashboard viewers; the session front end counts them.
+    viewers = _Watched[int]()
+    last_error = _Watched[dict[str, Any] | None]()
+
     def __init__(self, cfg: Config, timing: Timing | None = None):
         self.cfg = cfg
         self.timing = timing or Timing()
+        self._subscribers: list[Callable[[], None]] = []
+        self._notify_pending = False
         self.store = StateStore(cfg.state_file)
         self.adb = Adb(cfg.adb_bin, cfg.android_env())
         self.state = State.STOPPED
-        self.phase: str | None = None
-        self.gpu: str | None = None
-        self.api_level: int | None = None
-        # Dashboard viewers; the session front end counts them.
+        self.phase = None
+        self.gpu = None
+        self.api_level = None
         self.viewers = 0
-        self.last_error: dict[str, Any] | None = None
+        self.last_error = None
         self.grpc: EmulatorGrpc | None = None
         self._emu: Emulator | None = None
         self._xvnc: Xvnc | None = None
@@ -172,6 +200,26 @@ class Supervisor:
             "last_error": self.last_error,
             "version": __version__,
         }
+
+    def subscribe(self, callback: Callable[[], None]) -> None:
+        """Call `callback` after the status changed: state, phase, gpu,
+        viewers or last_error. Changes in one step of the event loop give
+        one call. The idle and uptime seconds do not count as changes."""
+        self._subscribers.append(callback)
+
+    def _changed(self) -> None:
+        if not self._subscribers or self._notify_pending:
+            return
+        self._notify_pending = True
+        asyncio.get_running_loop().call_soon(self._notify)
+
+    def _notify(self) -> None:
+        self._notify_pending = False
+        for callback in self._subscribers:
+            try:
+                callback()
+            except Exception:
+                log.exception("a status subscriber failed")
 
     def status_line(self) -> str:
         boot = 1 if self.state is State.RUNNING else 0
@@ -218,16 +266,22 @@ class Supervisor:
         await self._join_boot(timeout)
 
     @contextlib.asynccontextmanager
-    async def lease(self) -> AsyncIterator[EmulatorGrpc]:
+    async def lease(self, wake: bool = True) -> AsyncIterator[EmulatorGrpc]:
         """Start Android if needed and keep the idle stop away while the
-        body runs. Success counts as activity."""
+        body runs. Success counts as activity. With `wake` false (a look at
+        the screen, not use) the lease never starts Android, fails with
+        `conflict` while it does not run, and does not count as activity."""
         self._leases += 1
         try:
-            await self._start(True, None)
+            if wake:
+                await self._start(True, None)
+            elif self.state is not State.RUNNING:
+                raise LifecycleError("conflict", f"android is {self.state.value}")
             if self.grpc is None:
                 raise LifecycleError("unavailable", f"android is {self.state.value}")
             yield self.grpc
-            self.touch_activity()
+            if wake:
+                self.touch_activity()
         finally:
             self._leases -= 1
 

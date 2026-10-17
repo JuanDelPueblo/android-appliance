@@ -2,9 +2,9 @@
 # run-tests.sh: run every test suite that needs no emulator.
 #
 # It runs ShellCheck, the bash tests of v2 and of the v1 scripts, the
-# Python tests (in the .venv of scripts/dev-venv.sh), the Hermes plugin
-# tests and the dashboard tests, and reports a clear SKIP when a tool is
-# not installed.
+# Python tests (in the .venv of scripts/dev-venv.sh), the tests of the web
+# dashboard (web/), the Hermes plugin tests and the v1 dashboard tests, and
+# reports a clear SKIP when a tool is not installed.
 set -uo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -72,6 +72,27 @@ elif command -v uv >/dev/null 2>&1; then
   fi
 else
   echo "SKIP tests/python (uv not installed; it creates the test environment)"
+fi
+
+# The web dashboard: unit tests of its modules, and UI tests in Chromium
+# when Playwright is available. It is not a dependency of the repository:
+# point AA_PLAYWRIGHT at a node_modules directory that has `playwright`
+# (with its Chromium installed), or install it where Node finds it. One of
+# the UI suites runs the real daemon against the fake emulator, in the
+# Python environment of the tests (it skips itself without one).
+if command -v node >/dev/null 2>&1; then
+  run "tests/web unit" node --test tests/web/unit/*.test.mjs
+  # The real-device test of the dashboard needs KVM and Podman: at least check that it parses.
+  syntax=0
+  for file in tests/e2e/*.mjs; do node --check "$file" || syntax=1; done
+  report "tests/e2e syntax" "$syntax"
+  if reason=$(node tests/web/has-playwright.mjs); then
+    run "tests/web ui" env AA_PYTHON="${python:-}" node --test tests/web/ui*.test.mjs tests/web/daemon.test.mjs
+  else
+    echo "SKIP tests/web ui ($reason)"
+  fi
+else
+  echo "SKIP tests/web (node not installed)"
 fi
 
 if command -v node >/dev/null 2>&1; then

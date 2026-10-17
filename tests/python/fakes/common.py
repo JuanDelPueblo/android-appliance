@@ -6,6 +6,8 @@ $FAKE_ANDROID is the directory of one fake device:
   booted         exists once the fake guest finished booting
   device/        the guest file system for push, pull and ls
   *.jsonl        what the fakes saw, for the tests
+  rtc-bye        while it exists, the fake emulator ends WebRTC streams with a bye
+  rtc-eof        while it exists, it ends them without one
 """
 
 import json
@@ -28,6 +30,13 @@ DEFAULTS = {
     "screenshot_fails": False,
     "xvnc_fails": False,
     "glx_renderer": "Mesa Intel(R) UHD Graphics 630 (CFL GT2)",
+    # The shade of the fake display: a thumbnail of another shade is another picture.
+    "display": 0,
+    # Seconds after an answer until the fake emulator lets a WebRTC stream go,
+    # like ICE that failed (None: never).
+    "rtc_release_after": None,
+    # turnserver: normal | crash (exits at once)
+    "turn_mode": "normal",
 }
 
 

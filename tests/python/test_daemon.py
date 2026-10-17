@@ -41,6 +41,7 @@ def daemon_env(cfg, port: int) -> dict[str, str]:
         "APPLIANCE_ADB": cfg.adb_bin,
         "APPLIANCE_XVNC": cfg.xvnc_bin,
         "APPLIANCE_GLXINFO": cfg.glxinfo_bin,
+        "APPLIANCE_TURNSERVER": cfg.turnserver_bin,
         "APPLIANCE_RENDER_NODE": cfg.render_node,
         "APPLIANCE_PORT": str(port),
     }
@@ -82,11 +83,18 @@ def test_daemon_end_to_end(cfg, fake, tmp_path):
 
         asyncio.run(exercise(str(cfg.socket_path), port, tmp_path))
         assert len(fake.launches()) == 1
+        # coturn runs with the daemon, not with Android.
+        [turn] = fake.turn_starts()
+        assert turn["argv"][0] == "-c"
+        turn_pid = int((fake.root / "turnserver.pid").read_text())
 
         proc.send_signal(signal.SIGTERM)
         assert proc.wait(timeout=30) == 0
         log = proc.stderr.read()
     assert "stopping android, then the daemon" in log
+    # turnserver ended with the daemon.
+    with pytest.raises(ProcessLookupError):
+        os.kill(turn_pid, 0)
     # Android stopped gracefully: one "emu kill" and a clean exit.
     assert fake.signals() == ["emu kill"]
     assert fake.emulator_pid() is None

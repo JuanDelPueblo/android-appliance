@@ -221,6 +221,10 @@ on `registry.fedoraproject.org/fedora:44`:
    `appliance/proto/` (copied from the pinned emulator, Apache 2.0).
 4. The `appliance` package, `androidctl` and the dashboard (`web/`).
 
+The build also adds the `Rtc` service to the SDK's gRPC allow list
+(`emulator/lib/emulator_access.json`, see WebRTC) and fails if the edit did
+not take effect.
+
 The SDK archives are downloaded when the user builds the image. The
 image is not published, because the SDK license does not allow
 redistribution.
@@ -332,7 +336,7 @@ container gets the file as its environment file.
 | `APPLIANCE_LISTEN_ADDRESS` | `127.0.0.1` | install | address of the published ports |
 | `APPLIANCE_PORT` | `6090` | install, daemon | HTTP port on the host |
 | `APPLIANCE_TURN_PORT` | `3478` | install, daemon | TURN port on the host |
-| `APPLIANCE_TURN_HOST` | empty | daemon | host name for TURN URLs; empty means the host name of the page |
+| `APPLIANCE_TURN_HOST` | empty | daemon | host name or IP address (no port) for TURN URLs; empty means the host name of the page |
 | `APPLIANCE_API_LEVEL` | `36` | install (build), daemon | system image of the image build; the daemon checks it against the image |
 | `APPLIANCE_GPU` | `auto` | install, daemon | `auto`, `host` or `lavapipe` |
 | `APPLIANCE_GPU_DEVICE` | `auto` | install | render node; `auto` is the first `/dev/dri/renderD*` |
@@ -369,7 +373,7 @@ runs only, the daemon also reads `APPLIANCE_DATA_DIR` (`/data`),
 `APPLIANCE_HTTP_PORT` (`8080`), `APPLIANCE_SDK_ROOT` (`/opt/android-sdk`),
 `APPLIANCE_WEB_DIR` (`web/` next to the package), the programs
 `APPLIANCE_EMULATOR`, `APPLIANCE_ADB`, `APPLIANCE_XVNC`, `APPLIANCE_GLXINFO`,
-`APPLIANCE_RENDER_NODE` (instead of the first `/dev/dri/renderD*`), and
+`APPLIANCE_TURNSERVER`, `APPLIANCE_RENDER_NODE` (instead of the first `/dev/dri/renderD*`), and
 `APPLIANCE_CONFIG` (a file in the format above that fills the keys the
 environment does not set).
 
@@ -386,14 +390,15 @@ grpc.aio). The modules:
 | `emulator` | Xvnc, the emulator process, discovery, logs, locks |
 | `adb` | async adb wrapper |
 | `grpc_client` | emulator gRPC: screenshot, input stream, clipboard, Rtc |
-| `input` | key table and input encoding (see Input) |
+| `input` | key table, input encoding and the input of a browser session (see Input and WebSocket session) |
 | `supervisor` | lifecycle state machine, idle policy, leases, crashes |
 | `backend` | the operations; one implementation used by every front end |
 | `client` | the same operations over HTTP (unix socket or TCP), for MCP stdio and tests |
 | `api` | REST routes, auth, static dashboard, WebSocket session |
 | `auth` | API token, sessions, one-time login links |
 | `turn` | coturn configuration and process, TURN credentials |
-| `webrtc` | signaling bridge for one stream |
+| `webrtc` | signaling bridge: the emulator streams of the viewers |
+| `session` | the WebSocket session: status, streams, input, display hash |
 | `mcp_server` | MCP tools on top of `backend` |
 
 ### Lifecycle
@@ -573,6 +578,15 @@ Verified against Android (getevent, dumpsys, UI dumps, screenshots):
   every path drops non-ASCII; `adb shell input text` fails on unicode.
   Exact text is `getClipboard` (save), `setClipboard(text)`, wait 0.3 s,
   `KEY_PASTE` (evdev 135), wait 0.3 s, `setClipboard(saved)`.
+- **Typing after a first boot**: in the first minutes after the first boot
+  of a new AVD, typed keys are dropped or reordered, whoever sends them
+  (measured through `POST /input/text` with the `keys` method and through
+  the dashboard at 40 ms a key: `jane doe` became `jane do`, `ne doeja`,
+  `oede jan` and `doejane`, also with no input method enabled; a paste was
+  lost once). After a restart of the same AVD the text landed exactly in 14
+  of 14 rounds, and the raw key events in the guest (`getevent`) were in
+  order in every round that was measured. So the order of the key events
+  that the daemon sends is not what fails.
 - **Android key names** for the CLI, API and MCP: `HOME`→`GoHome`,
   `BACK`→`GoBack`, `APP_SWITCH`/`RECENTS`→`AppSwitch`, `POWER`→`Power`,
   `VOLUME_UP`/`VOLUME_DOWN`, `MENU`→evdev 139, `ENTER`, `TAB`, `DEL`
@@ -595,59 +609,166 @@ Measured facts:
   flat candidates `{"candidate","sdpMid","sdpMLineIndex"}`, and
   `{"bye":"disconnected"}`. There is no end-of-candidates message. The
   emulator accepts the same shapes back (`{"type":"answer","sdp"}`).
+- With `-grpc-use-token` the emulator also checks `lib/emulator_access.json`,
+  and the file has no entry for the `Rtc` service: `RequestRtcStream` is
+  refused with `The endpoint: /android.emulation.control.v2.Rtc/RequestRtcStream
+  is not on the allowlist`. The image build adds `/android.emulation.control.v2.Rtc/.*`
+  next to `EmulatorController` in the `allowed` list of `android-studio` (the
+  issuer that the token mode uses). The token still guards every call.
 - Without an `ice_server_config`, the emulator uses
   `stun:stun.l.google.com:19302` and puts the host's public address in the
   offer. Always pass `{ice_servers:[{urls:["stun:127.0.0.1:3478"]}]}`: host
-  candidates only, no relay allocations on the emulator side.
+  candidates only (the container's global addresses, UDP and TCP-passive),
+  no relay allocations on the emulator side, and nothing in the emulator
+  log about Google or `srflx`.
 - The offer has VP8 (chosen by Chromium), VP9, an audio track (even with
   `-no-audio`) and four data channels (`mouse`, `keyboard`, `touch`,
   `adb`). The appliance sends input over its own WebSocket instead (one
   path for every front end, exact activity tracking, input independent
   of the media state).
 - The emulator sends a frame only when the display changes. A new viewer
-  on a static screen gets no frame; a static stream decodes 0 fps.
+  on a static screen gets no frame; a static stream decodes 0 fps (a
+  blinking caret, a clock or an animation give frames).
 - A client `bye` is ignored. After the client's ICE goes away, the
-  emulator ends the stream with `{"bye":"disconnected"}` after about 17 s.
+  emulator ends the stream with `{"bye":"disconnected"}` after about 15-17 s.
 - An offer that is never answered stays open for good and leaks file
-  descriptors, threads and, with emulator-side TURN, relay ports.
+  descriptors (about 20 for each stream), threads and, with emulator-side
+  TURN, relay ports. Ways to make the emulator let go of it, measured by
+  counting the descriptors of qemu: an answer with all media sections
+  rejected, an answer without a candidate, and an answer with a candidate
+  on port 9 all left the stream open for good (45-160 s watched, ICE
+  stayed in `kIceConnectionChecking`). An answer that accepts the
+  sections, with made-up ICE and DTLS values, and one candidate on a
+  closed port of the emulator's own address (40000) makes ICE fail: the
+  emulator sends `{"bye":"disconnected"}` 15.1 s later and the descriptors
+  go back to the baseline.
+- A viewer that vanishes before its ICE connected leaves a stream that the
+  emulator keeps for good. Measured with Chromium killed (or closed with
+  `browser.close()`) while a stream was connected: the emulator's
+  descriptors stayed at 195 (baseline 100) for 5 minutes after 5 such streams,
+  with no log line. A normal close ends the stream after 15-17 s. A killed
+  browser's port is closed, so the packets of the relay come back as
+  errors and the emulator's ICE never reaches `failed`. A candidate on a
+  closed port of the emulator's own address (the one of the throwaway answer)
+  sent to such a stream made the emulator end it 13 s later and free its
+  19 descriptors.
 - When qemu dies, `ReceiveJsepMessageStream` fails at once with
   `UNAVAILABLE`; the browser sees ICE failure only after about 15 s.
+  Measured: the viewer's stream ended 0.35 s after `kill -9` of qemu.
+- The gfxstream crash of the GPU section (`GL calls without a current
+  context`, then `SIGSEGV`) happened once in about 40 minutes of driving a
+  booted device: 2.5 minutes after the last stream had ended, with no
+  stream open, while keys were sent. The daemon reported `crash` (the
+  boot was long over, so no retry) and the next command cold booted.
 
 Design:
 
-- **TURN**: coturn in the container, `use-auth-secret` (TURN REST
-  credentials: `username=<expiry>:<id>`,
-  `credential=base64(HMAC-SHA1(secret, username))`, 24 h), relay range
-  49152-49251, `no-tcp-relay`, `no-multicast-peers`, quotas, and
-  `denied-peer-ip` for everything except the container's own addresses
-  (`allowed-peer-ip`, computed at start with `ip -o addr show scope global`).
-  Verified: relaying to any other address gets 403. coturn 4.18 rejects
-  `no-dtls` and `no-cli` (both already defaults).
+- **TURN** (`turn`): coturn 4.18 in the container, started with the
+  daemon and kept alive (a delay of 1 s that doubles to 30 s between
+  restarts, and starts over after 30 s of uptime). The configuration is
+  generated at every start into `/tmp/appliance/turnserver.conf` (mode
+  0600, it holds the secret) from `ip -o addr show scope global`: listening on
+  3478 (udp and tcp), `use-auth-secret` with the secret
+  `appliance/secrets/turn-secret`, relay range 49152-49251 on the first
+  IPv4 address, `no-tcp-relay`, `no-multicast-peers`, `user-quota=4`,
+  `total-quota=80`, `max-allocate-lifetime=60` (a killed browser never frees
+  its relays; at the default of 10 minutes a few dozen of them would use up
+  the 100 ports and the quota, and a live browser refreshes at half of the
+  lifetime), `denied-peer-ip` for everything and `allowed-peer-ip` for each
+  global address of the container. coturn writes its log to
+  stdout, which the daemon logs with the prefix `turnserver:` (at most 100
+  lines a minute). Credentials are TURN REST credentials:
+  `username=<expiry>:<random id>`,
+  `credential=base64(HMAC-SHA1(secret, username))`, valid 24 h, new for
+  every stream and issued only inside an authenticated session. Verified
+  against the daemon's configuration: a relay to the container's address
+  is permitted; to the Internet, the LAN gateway, other LAN hosts,
+  `127.0.0.1`, `10.0.2.2`, `169.254.1.2` and multicast it gets 403, over UDP
+  and TCP; a wrong password and an expired user name get 401. coturn 4.18
+  rejects `no-dtls` and `no-cli` (both already defaults; no CLI port
+  listens). Without a global address in the container the relay has no
+  peer and WebRTC cannot connect; the daemon says so in its log.
 - **Browser**: `RTCPeerConnection` with only the TURN server and
-  `iceTransportPolicy: "relay"`, answer only, trickle ICE. The TURN URLs use
-  `APPLIANCE_TURN_HOST`, or else the host name of the page, with
-  `APPLIANCE_TURN_PORT`, for `udp` and `tcp`. Media stays on one known
-  port whatever the network; local and remote access use the same path.
+  `iceTransportPolicy: "relay"`, answer only, trickle ICE. The TURN URLs
+  (`turn:<host>:<port>?transport=udp` and `?transport=tcp`) use
+  `APPLIANCE_TURN_HOST`, or else the host name of the page (the `Host`
+  header, or `X-Forwarded-Host` behind a trusted proxy; an IPv6 literal gets
+  brackets), with `APPLIANCE_TURN_PORT`. Media stays on one known port
+  whatever the network; local and remote access use the same path.
 - **Bridge** (`webrtc`): one emulator stream per viewer, requested only
   when the browser asks for it. The bridge drops the emulator's `start`
   (it echoes the ICE configuration), sends the browser its own start with
-  the TURN configuration, never forwards empty candidates, and forwards
-  `bye` and gRPC stream ends as `stream ended`. If a viewer goes away
-  before it answers, the bridge sends the emulator a throwaway answer, so
-  ICE fails and the emulator releases the stream. Limit: 4 streams.
+  the TURN configuration, never forwards empty candidates, rebuilds the
+  viewer's answer and candidates from their known fields (nothing else, a
+  `bye` for example, reaches the emulator), and forwards `bye` and gRPC
+  stream ends as `stream ended`. If a viewer goes away before it answers,
+  the bridge sends the emulator the throwaway answer above (built from the
+  offer, with the address of the emulator's first UDP host candidate). A
+  stream that a viewer left stays in the bridge until the emulator ends it
+  (the bye after 15-17 s). One that the emulator still holds after 25 s gets
+  a candidate on a closed port (the stuck stream above), and the bridge
+  forgets it after 30 s more. At most 4 viewers have a stream,
+  and at most 8 closed streams wait for the emulator, so a client that
+  reconnects in a loop cannot pile up encoders. The `stream_limit` error
+  says which limit it is.
 - **First frame and freezes**: the dashboard shows a gRPC screenshot as a
-  poster until the first video frame arrives. While a stream runs, the
-  daemon samples a small gRPC screenshot (for example 54x96 RGB) once per
-  second and sends its hash as a `display` event. If the hash changes and
-  no new frame is decoded within 3 s, the dashboard reconnects the stream.
-  The device settings are not changed (no seconds clock).
+  poster until the first video frame arrives. The poster is passive
+  (`GET /screenshot?passive=1`): it never starts Android and is not use,
+  so a stop that races the request cannot boot Android again. A screenshot
+  that counted as use would also keep an unused Android awake for ever,
+  because a static screen sends no frame. So the dashboard fetches the poster
+  when Android runs and the video has no frame, again every 4 s for 8 more
+  times, and again whenever the display hash changes while there is still no
+  frame; Reconnect and a tab that is shown again start the 8 refreshes over.
+  While a stream runs, the daemon samples a small gRPC screenshot (54x96
+  RGB, 2 ms) once per second and sends a hash of it as a `display` event.
+  If the hash changes and no new frame is decoded within 3 s, the dashboard
+  reconnects the stream. Measured: a stalled media path was noticed after
+  4.3 s while a list scrolled. A change of only the seconds of a status bar
+  clock is too small to change the hash every second, so the detection
+  needs a visible change of the screen. The device settings are not changed
+  (no seconds clock).
 - **Reconnection**: on ICE `failed`, a stream end, or a WebSocket close,
   the dashboard reconnects with backoff while the device is `running`.
   It never starts a stopped device by itself; the Start button does.
   A hidden tab closes its stream after 60 s and reconnects when visible.
-- **Latency**: measured touch-to-decoded-frame was about 140 ms (median),
-  including Android's own rendering. The dashboard sets
-  `receiver.jitterBufferTarget = 0` (playout delay hint) where supported.
+- **Latency**: the dashboard sets `receiver.jitterBufferTarget = 0`
+  (playout delay hint) where supported. Measured with headless Chromium
+  151 on juno (API 36, GPU, relay over UDP on the loopback), see the table
+  below.
+
+Measured with a throwaway page of the appliance origin that speaks the
+session protocol (Playwright 1.62.1, headless Chromium 151; API 36, GPU
+`host`, 3072 MiB guest):
+
+| Measurement | Value |
+|---|---|
+| ICE and DTLS connected, after the start message | 88-220 ms (median 155 ms in 60 streams) |
+| selected pair | local `relay/udp`, remote `host/udp`; VP8 1080x1920 |
+| first decoded frame, when the screen changes at once | 270-330 ms |
+| touch drag of a list to the first decoded frame that shows it moved (two runs of 40 drags) | median 58 ms and 86 ms (p25 54 and 69, p90 105 and 184; the second run shared the host with other builds and started slower) |
+| key to the first decoded frame (8 keys) | 48-133 ms, median 66 |
+| 20 start and stop cycles, 3.5 s apart | 20 of 20 connected; descriptors of qemu peaked at 172 (baseline 102) and were back at 102 after 15 s; no relay socket left. At 2.5 s apart one start of 20 was refused (`stream_limit`) |
+| 14 cycles 0.3 s apart | 8 connected, the other 6 got `stream_limit`; descriptors peaked at 252 and were at the baseline 15 s after the last one |
+| 4 viewers at once while the list scrolls | every viewer decoded 15-21 frames in 5 s, no packet lost, no frame dropped; the fifth stream got `stream_limit`, and connected after one viewer left; qemu used 17 descriptors for each stream |
+| `kill -9` of qemu with a stream running | `stream ended` 0.29-0.35 s later; status `stopping`, `last_error` `crash`; a stream start answered `not_running`; a new start of Android (15 s) and a new stream worked |
+| unit stop (SIGTERM) with a stream running | the unit stopped in 3.2 s; the viewer got `ended` ("android is not running"), status `stopped` and the close code 1012 |
+| unanswered stream, throwaway answer | released 15.1 s later, descriptors back to the baseline |
+| display hash of a static screen | the same for 8 s; another when a finger touches the launcher |
+| small gRPC screenshot for the display hash | 2.1 ms (median) |
+
+The thread count of qemu is not a usable signal (it moves by 30 and more
+while idle); the descriptors are.
+
+Input over the WebSocket, checked against Android (22 of 22 checks):
+buttons HOME, BACK, APP_SWITCH (overview), POWER (screen off and on; a hold
+of 1.3 s opens the Assistant, which this system image maps to a long press),
+VOLUME_UP and VOLUME_DOWN (music volume 5 to 6 to 3), MENU (`KEY_MENU` in
+`getevent`); touch tap, drag, hold (long press opens the app menu) and two
+fingers (two tracked contacts in `getevent`); mouse click, drag and
+right click (Back); wheel down and up scroll a list; keys into a text field
+(letters, Backspace, ArrowLeft, Shift letters), `text` with
+`Grüße 日本 😀`, and a key outside ASCII.
 
 ## HTTP API
 
@@ -668,7 +789,7 @@ the boot; a failed boot gives `boot_failed` (or `timeout`).
 | `POST /stop` | `{"wait":true}` | status |
 | `POST /restart` | `{"wait":true}` | status |
 | `POST /wait` | `{"timeout":900}` | status; 409 when stopped |
-| `GET /screenshot` | `?format=png\|jpeg&quality=85&max_size=<px>` | image; headers `X-Device-Width`, `X-Device-Height`, `X-Image-Scale` |
+| `GET /screenshot` | `?format=png\|jpeg&quality=85&max_size=<px>&passive=1` | image; headers `X-Device-Width`, `X-Device-Height`, `X-Image-Scale`; `passive` only looks: it never starts Android (`conflict` while it does not run) and is not use |
 | `GET /ui` | `?format=xml\|compact` | XML text or `{"nodes":[...]}` |
 | `POST /input/tap` | `{"x","y"}` | `{}` |
 | `POST /input/long-press` | `{"x","y","duration_ms":800}` | `{}` |
@@ -689,6 +810,8 @@ the boot; a failed boot gives `boot_failed` (or `timeout`).
 | `GET /auth/token` | local only | `{"token"}` |
 | `POST /auth/token/rotate` | local only | `{"token"}` |
 | `GET /session` | WebSocket | dashboard session (below) |
+
+Outside `/api/v1`, `POST /logout` ends the session of a browser (below).
 
 The status object: `state`, `boot_completed`, `idle_seconds`,
 `idle_stop_seconds`, `uptime_seconds` (since the emulator started; 0
@@ -716,15 +839,34 @@ read. Strings (`command`, `text`, `key`, ...) must not contain a NUL
 character or unpaired surrogates, and query integers must be ASCII
 digits; the daemon answers `bad_request`.
 
-Every HTTP response carries `X-Frame-Options: DENY`, `Content-Security-Policy:
-frame-ancestors 'none'`, `X-Content-Type-Options: nosniff` and
-`Referrer-Policy: no-referrer`; the API answers and the login page also
-carry `Cache-Control: no-store`.
+Every HTTP response carries `X-Frame-Options: DENY`,
+`X-Content-Type-Options: nosniff` and `Referrer-Policy: same-origin` (under
+`no-referrer` a browser puts `Origin: null` on the form post of the login and
+the logout, and the same-origin check would refuse it). The
+API answers have `Content-Security-Policy: frame-ancestors 'none'`. The
+dashboard and the login page have `default-src 'self'; img-src 'self' blob:
+data:; media-src 'self' blob:; connect-src 'self'; style-src 'self';
+script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action
+'self'`: they load nothing but their own files, run no inline script and
+apply no inline style (a script may set `element.style`). `connect-src
+'self'` covers the WebSocket of the same origin. The API answers, the login
+page and the logout carry `Cache-Control: no-store`. The dashboard's files carry
+`Cache-Control: no-cache`: a browser asks the daemon again each time (a short
+304), so a browser that signed out goes to the login page instead of showing
+the dashboard from its cache, and an update takes effect at once.
 
 Outside `/api/v1`: `GET /login` is the login form; `POST /login` (form
 field `token`) and `GET /login?code=<code>` (a login link) set the
-session cookie. `GET /` serves the dashboard (`web/`, or a short page
+session cookie. `POST /logout` clears the cookie and answers 303 to
+`/login`; with a cookie it needs the same `Origin` as any other request
+that changes state. `GET /` serves the dashboard (`web/`, or a short page
 when it is not installed); without a session it redirects to `/login`.
+The only file that needs no session is `/app.css`, the style sheet of the
+login page, so the dashboard's CSS must not pull in anything else for it.
+The login page is rendered by the daemon, with the markup that the
+dashboard's CSS styles: `<main class="login">` with the `h1`, a
+`p.error` when there is a message, the form with `label[for=token]`,
+`input#token` and a submit button, and `p.hint`.
 
 ### Text formats for shell clients
 
@@ -764,11 +906,16 @@ Read "What the guest can reach" before you trust a device with accounts.
   redirect: a SameSite=Strict cookie set on a navigation from another
   site (a link opened from a terminal or a chat) is not sent on that
   navigation's redirect.
+- `POST /logout` clears the cookie (`Max-Age=0`) and answers 303 to
+  `/login`. The signature of the cookie is not revoked: the cookie is
+  dropped from the browser, and only `androidctl token --rotate` ends it
+  everywhere.
 - A login link is `http://<APPLIANCE_LISTEN_ADDRESS>:<APPLIANCE_PORT>/login?code=<code>`
   (`127.0.0.1` for a wildcard address). It works once, within 2 minutes.
 - `androidctl token --rotate` also replaces the session key and drops the
   pending login links, so it ends every dashboard session and every link
-  made before it.
+  made before it. It also closes the WebSocket sessions that are open
+  (close code 1008), which hold the old token or cookie.
 - Failed logins and wrong bearer tokens are rate limited: after 5 in a
   minute from one client, further wrong tokens get `rate_limited` until
   the minute is over. The right token always works, so nobody can lock
@@ -800,24 +947,148 @@ Read "What the guest can reach" before you trust a device with accounts.
 
 ### WebSocket session
 
-`GET /api/v1/session` (cookie or bearer). JSON messages.
+`GET /api/v1/session` (cookie or bearer; a cookie needs our own `Origin`).
+JSON text messages, at most 256 KiB. The daemon accepts 16 sessions at
+once (more get the close code 1013).
 
-Client to server: `{"type":"stream","action":"start"|"stop"}`,
-`{"type":"jsep","data":{answer or candidate}}`,
-`{"type":"touch","touches":[{"id","x","y","pressure"}]}`,
-`{"type":"mouse","x","y","buttons"}`, `{"type":"wheel","x","y","dx","dy"}`,
-`{"type":"key","key","code","action":"down"|"up"|"press"}`,
-`{"type":"text","text"}`, `{"type":"ping","t"}`.
+On connect the server sends `{"type":"hello","device":{"width":1080,"height":1920},"version"}`
+and `{"type":"status",...}`, the status object of `GET /status`. It
+sends the status again at every change of `state`, `phase`, `gpu`,
+`api_level`, `viewers` or `last_error` (changes in one step of the event
+loop make one message), and every 15 s, so the idle time stays current.
+`viewers` is the number of sessions with a stream.
 
-Server to client: `{"type":"status",...}` (on connect and on every
-change), `{"type":"stream","state":"starting"|"ended","reason"}`,
-`{"type":"stream","state":"configured","iceServers":[...],"iceTransportPolicy":"relay"}`,
-`{"type":"jsep","data":{offer or candidate}}`,
-`{"type":"display","hash","t"}`, `{"type":"pong","t"}`,
-`{"type":"error","code","message"}`.
+Client to server:
 
-Touch identifiers are per session; the daemon maps them to unique
-emulator identifiers. Coordinates are device pixels.
+| Message | Meaning |
+|---|---|
+| `{"type":"stream","action":"start"\|"stop"}` | start a stream (a start replaces the stream that runs); stop it |
+| `{"type":"jsep","data":{...}}` | the answer `{"type":"answer","sdp"}` or a candidate `{"candidate","sdpMid","sdpMLineIndex"}` (the empty end-of-candidates message is dropped) |
+| `{"type":"touch","touches":[{"id","x","y","pressure"}]}` | up to 10 fingers; `id` is a number or short text of the session; `pressure` is 0 (lift) or 0 to 1 like `PointerEvent.pressure` |
+| `{"type":"mouse","x","y","buttons"}` | `buttons` like `PointerEvent.buttons`: the left button (bit 0) is a finger, a press of the right button (bit 1) is Back; moving with no button does nothing |
+| `{"type":"wheel","x","y","dx","dy"}` | wheel deltas in CSS pixels; a drag of about 168 px per 120 units, in the opposite direction, started at the pointer |
+| `{"type":"key","key","code","action":"down"\|"up"\|"press"}` | a W3C `KeyboardEvent.key` (`code` is informative) |
+| `{"type":"button","name","action":"down"\|"up"\|"press"}` | `HOME`, `BACK`, `APP_SWITCH`, `POWER`, `VOLUME_UP`, `VOLUME_DOWN`, `MENU`; `down` and `up` allow holds |
+| `{"type":"text","text"}` | any Unicode, pasted through the clipboard (at most 64 Ki characters) |
+| `{"type":"ping","t"}` | answered with `{"type":"pong","t"}` |
+
+Server to client: `status`, `hello`, `pong`, and
+
+- `{"type":"stream","state":"starting"}`, then
+  `{"type":"stream","state":"configured","iceServers":[...],"iceTransportPolicy":"relay"}`,
+  then the emulator's messages as `{"type":"jsep","data":{offer or candidate}}`.
+  `{"type":"stream","state":"ended","reason"}` follows when the emulator
+  ends the stream, its gRPC stream fails, Android stops, or the client sent
+  `stop`. A start that replaces a stream sends no `ended` for the old one.
+- `{"type":"display","hash","t"}` once per second (`t` in milliseconds
+  since the epoch) while this session has a stream: the hash of a small
+  screenshot, for freeze detection.
+- `{"type":"error","code","message"}`: `bad_request` (unreadable message,
+  unknown type, a field out of range), `not_running` (a stream or input
+  while Android is not running; a session never starts Android),
+  `stream_limit`, `unavailable` (TURN is not running, or a paste failed).
+  Errors are limited to a burst of 5 and one a second.
+
+Rules:
+
+- Coordinates are device pixels of the natural 1080x1920 frame. The
+  dashboard maps from the video element, with its letterboxing and any
+  rotation of the frame; the daemon clamps to the frame.
+- Touch identifiers are per session; the daemon maps them to unique
+  emulator identifiers (the mouse is one more finger). A lift of an
+  unknown id is dropped. The daemon lifts all contacts of a session where
+  they were last seen when the session closes, and forgets them when
+  Android stops. Keys and buttons that are down are let go the same way.
+- Keys use the table of Input. A printable ASCII `key` is one key press
+  at every `down` and `press` (repeats included), nothing at `up`. A
+  named key sends `keydown` at `down`, `keyup` at `up` and `keypress` at
+  `press`; a `down` for a key that is down already is a repeat and is
+  dropped (Android repeats a held key itself). `ContextMenu` and `Menu`
+  are evdev 139, `BrowserHome` is `GoHome`; `CapsLock`, `Dead`, `Process`
+  and `Unidentified` are dropped; a printable character outside ASCII is
+  pasted like `text`. Keys, buttons and text run in the order of
+  arrival, with 5 ms between key events, and a paste holds the text lock. A
+  paste lets go of the modifiers that the session holds and presses them
+  again after it: Android ignores the paste key while a modifier is down
+  (measured: a browser's Ctrl+V pasted nothing), and Ctrl+V holds Control.
+- A wheel notch that arrives while a drag runs adds to the next drag; a
+  delta shorter than 30 px waits for more (a shorter drag would be a tap),
+  a drag near the edge starts further in so that it keeps its length.
+- Every input message (also a mouse that moves with no button) and a
+  stream start update the activity time while Android runs. A session
+  that only watches does not, and neither do `ping`, `status` or a message
+  that was refused.
+- A client that sends more than 1500 messages a second (3000 at once),
+  or lets more than 256 key, button, text or stream messages wait, is
+  closed with the code 1008. A client that does not read its messages (512
+  waiting) is closed with 1013.
+
+## Dashboard
+
+The dashboard is the plain files in `web/`: `index.html`, `app.css`,
+`js/*.js` as ES modules and `icons/*.svg` (drawn as CSS masks). It has no
+build step, no framework and no external file, so the policy of the page can
+say `default-src 'self'`. The daemon serves it at `/`.
+
+**Page.** The device display (video element, poster and an overlay that
+says what is going on), a toolbar (Back, Home, Recents, Power, Volume down
+and up, keyboard capture), and a panel with the state of Android (Start,
+Stop and Restart; Stop and Restart ask first, because they close apps), the
+viewers, screen, API level, GPU and the last error with its log tail, the
+state of the connection (session, video, ICE, codec, resolution, frame rate,
+bit rate, lost packets, round trip, decoded frames, and the time from an
+input to the next frame as a rough guide) and Sign out. Beside the display
+at 900 px and wider, a drawer below that.
+
+**Link.** `protocol.js` is the whole client side of the session protocol as
+a state machine without I/O: it takes events (the socket opened, a message
+arrived, a timer fired, the peer connection changed, the video froze, the
+tab was hidden or shown) and returns effects (send, set a timer, open the
+peer connection). The browser calls are in the other modules. The rules:
+
+- The session socket reconnects with a delay that doubles from 0.5 s to
+  10 s (with 25 % jitter) and starts over after a connection held for 8 s.
+  The dashboard pings every 10 s and closes a socket that was silent for
+  25 s. A socket that never opened asks `GET /api/v1/status`: a 401 goes to
+  the login page.
+- A stream is wanted while the socket is open, Android runs and the tab
+  was not hidden for 60 s. It never starts Android: `not_running` from the
+  daemon only ends the attempt, and the Start button is the only way.
+- A stream that fails (ICE `failed`, ICE `disconnected` for 4 s, no
+  connection in 15 s, an `ended` message, an `error` while it starts, a
+  freeze of 3 s with a changed display hash) is closed and started again
+  with the same backoff. A start replaces the stream on the server, so
+  Reconnect and the `online` event of the browser need no stop first.
+- A hidden tab keeps its socket but stops its stream after 60 s, and
+  brings it back when the tab is shown.
+
+**Input.** The position of a pointer is mapped from the video element (which
+letterboxes the picture) to device pixels, clamped to the frame. A turned
+guest keeps the natural 1080x1920 frame, so the picture position is the
+touch position; a decoded frame in the other orientation is mapped back
+(`geometry.js`). A mouse sends `mouse` messages (left button is a finger,
+right button is Back), touch and pen send `touch` messages that list every
+contact that is down (a lifted one once, with pressure 0), the wheel sends
+`wheel` (a `deltaMode` of lines or pages becomes pixels). Moves and wheel
+turns go once per animation frame, presses and releases at once and after
+the moves before them. Everything that is down is let go when the tab is
+hidden, the window loses the focus, Android stops or the socket drops.
+
+The keyboard goes through a hidden text area that has the focus. A printable
+ASCII key is `press`, a named key is `down` and `up` (a repeat is dropped),
+and text that no key carries (a composition result, a character outside
+ASCII, a paste) is a `text` message of at most 60,000 characters. The
+shortcut for a paste is not a key: the browser's paste event delivers the
+text. With a mouse or keyboard the capture is on and Ctrl+Alt+K turns it off,
+so the keyboard is not trapped; on a touch device (`pointer: coarse`) it
+starts off, so that a tap does not raise the on-screen keyboard, and the
+toolbar button turns it on and asks for it. The toolbar buttons send
+`button` messages as `down` at the press and `up` at the release, so a hold
+of Power opens the power menu once `power_button_long_press` is set (the
+stock setting of this image opens the Assistant).
+
+**Login.** The login page is rendered by the daemon with the markup that
+`app.css` styles. `POST /logout` clears the cookie.
 
 ## androidctl
 
@@ -1017,6 +1288,83 @@ the image. Every wait polls a condition with a deadline. On a failure
 the step's message, the status, the daemon log, a UI dump and a
 screenshot (only when Android runs), the emulator logs and the journal
 stay in `/var/tmp/aa-e2e/work`.
+
+`tests/web` tests the dashboard. Unit tests (`node --test`) cover the link
+state machine, the backoff, the freeze detector, the geometry (letterbox and
+rotation), the key and touch rules and the statistics. UI tests in Chromium
+run against a fake appliance (rendering and the CSP, the lifecycle controls
+with their confirmation, the reconnect backoff, input of mouse, touch, pen,
+wheel, keyboard, IME, paste and buttons, a real WebRTC pair against a fake
+emulator page with a freeze restart and a hidden tab, and the layouts at
+1280x800 and 390x844), and against the real daemon with the fake emulator of
+the Python tests (`daemon.test.mjs`: the login by link and by form, the
+session, and the gRPC input that reaches the emulator). They need Playwright
+(`AA_PLAYWRIGHT`, or `npm ci` in `tests/e2e`) and skip without it.
+
+`tests/e2e/webrtc.sh` (`make e2e-webrtc`) is the real-device test of the
+dashboard. It installs its own instance (`aa-e2e-rtc`, ports 47082 and 47083)
+like `lifecycle.sh`, then `webrtc.mjs` drives headless Chromium through these
+steps and checks every effect against Android (UI dumps, `dumpsys`,
+`getevent` through `androidctl`), not against the dashboard:
+
+- login: the form with a wrong and a right token (the post carries the page's
+  `Origin`), a one-time link that works once, the cookie, sign out (the
+  dashboard is not served from the cache afterwards), and an anonymous
+  WebSocket that is refused;
+- a stopped Android offers Start and nothing starts by itself; Start shows
+  every phase, the poster and the first decoded frame (timed), also on a
+  static screen;
+- mouse: a click opens an app, a drag up opens the app drawer, a long press
+  opens the icon menu, the wheel scrolls Settings (checked by the item
+  positions of the UI dump), a right click is Back; the same with the guest
+  rotated to landscape (the picture stays in the natural frame and the click
+  lands on what is drawn);
+- touch on a phone-sized page: a tap, a swipe, and two fingers (two contacts
+  and tracking ids in `getevent`);
+- keyboard: ASCII, Backspace, the arrows, Delete, Shift, text outside ASCII,
+  an IME result and the paste shortcut, into the new-contact form, exact to
+  the character;
+- hardware buttons: Home, Back, Recents, the volume (the music volume
+  changes), Power held for 1.5 s (the power menu) and pressed (the screen
+  goes off and on);
+- Restart, Stop (the dashboard shows Start and does not start Android) and
+  Start (the video comes back by itself, without a reload);
+- a crash of qemu right after a boot is retried and the video returns; a
+  later crash shows "Android stopped unexpectedly" and Start recovers; a
+  restart of the daemon is survived by the session;
+- reconnection: the WebSocket closed from the page (three times), the browser
+  offline for 20 s, a killed TURN server, a stopped TURN server while a list
+  scrolls (the freeze is detected), a poster while the video cannot connect,
+  and a daemon that stops answering for 30 s;
+- two viewers (both decode, `viewers` is 2), a hidden tab (the stream closes
+  after the 60 s grace period and returns), and a long session without a
+  stream restart (`E2E_SOAK_SECONDS`, 120 by default);
+- measurements: input to decoded frame over 20 taps and over 20 drags, the
+  frame rate while scrolling, and the CPU of the emulator, daemon and coturn
+  without a viewer, with one watching a static screen and with one scrolling;
+- access under another host name (`http://localhost:<port>`): the TURN URLs
+  follow the page and the media flows through the relay; a TURN client with
+  the credentials of a session relays to the container's own address and
+  gets 403 for the Internet, the loopback, `10.0.2.2`, link-local, multicast
+  and the LAN gateway, over UDP and TCP, and 401 for a wrong credential and
+  an expired user name;
+- no stream is left behind: after all the reconnects of the run, the
+  emulator's descriptors and the relay ports are back at the baseline;
+- the idle stop with a dashboard open: input every 20 s keeps Android up past
+  the limit, and without input it stops with the dashboard still open;
+- rotating the API token closes the open session, the old token and cookie
+  stop working, the dashboard goes to the login page, and the new token
+  signs in;
+- the daemon log (the journal) has no traceback.
+
+Some checks need a setting of Android that makes the check possible, not
+part of the appliance: `clock_seconds=1` (the screen changes once a second,
+so frames flow on an otherwise static screen) and
+`power_button_long_press=1` (the stock setting of this image opens the
+Assistant on a long press). On a failure the step's message, a screenshot
+of the page and of Android, the UI dump, the status, the messages of the
+session, the console errors, the daemon log and the journal stay in
+`/var/tmp/aa-e2e-rtc/work`.
 
 Measured on juno (API 36, GPU host, 3072 MiB guest RAM, the installed
 instance driven through `androidctl`):

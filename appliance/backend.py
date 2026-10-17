@@ -153,9 +153,9 @@ class Backend:
         return self.status()
 
     @contextlib.asynccontextmanager
-    async def _use(self) -> AsyncIterator[EmulatorGrpc]:
+    async def _use(self, wake: bool = True) -> AsyncIterator[EmulatorGrpc]:
         """Hold a lease and turn transport failures into API errors."""
-        async with self.sup.lease() as stub:
+        async with self.sup.lease(wake) as stub:
             try:
                 yield stub
             except AdbTimeout as e:
@@ -171,8 +171,10 @@ class Backend:
 
     # Screen
 
-    async def screenshot(self, fmt: str = "png", quality: int = 85, max_size: int | None = None) -> Screenshot:
-        async with self._use() as stub:
+    async def screenshot(self, fmt: str = "png", quality: int = 85, max_size: int | None = None, passive: bool = False) -> Screenshot:
+        """A passive screenshot (the dashboard's poster) only looks: it never
+        starts Android and is not use."""
+        async with self._use(not passive) as stub:
             try:
                 png, width, height = await stub.screenshot()
             except (grpc.aio.AioRpcError, grpc.aio.BaseError) as e:

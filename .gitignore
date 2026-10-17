@@ -5,3 +5,4 @@ __pycache__/
 HANDOFF.md
 .venv/
 appliance/_proto/
+node_modules/

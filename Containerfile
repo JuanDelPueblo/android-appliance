@@ -88,6 +88,13 @@ RUN mkdir -p /opt/appliance/appliance/_proto \
 FROM runtime
 COPY --from=sdk /sdk/tools/ /opt/android-sdk/
 COPY --from=sdk /sdk/image/ /opt/android-sdk/
+# With -grpc-use-token the emulator also checks its gRPC allow list, and the
+# list has no entry for the WebRTC service (Rtc): RequestRtcStream is refused
+# ("is not on the allowlist"). Allow the service next to EmulatorController.
+# The token still guards every call.
+RUN f=/opt/android-sdk/emulator/lib/emulator_access.json \
+    && sed -i 's|^\( *\)"/android.emulation.control.EmulatorController/.\*",$|&\n\1"/android.emulation.control.v2.Rtc/.*",|' "$f" \
+    && grep -q 'android.emulation.control.v2.Rtc/' "$f"
 COPY --from=python /opt/appliance/venv/ /opt/appliance/venv/
 COPY --from=app /opt/appliance/ /opt/appliance/
 ENV PATH=/opt/appliance/venv/bin:/opt/appliance/bin:/opt/android-sdk/emulator:/opt/android-sdk/platform-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin \

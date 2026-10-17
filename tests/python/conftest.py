@@ -67,6 +67,15 @@ class Fake:
     def xvnc(self) -> list[dict]:
         return self._jsonl("xvnc")
 
+    def rtc(self, event: str | None = None) -> list[dict]:
+        return [e for e in self._jsonl("rtc") if event is None or e["event"] == event]
+
+    def turn_starts(self) -> list[dict]:
+        return self._jsonl("turn")
+
+    def thumbnails(self) -> list[dict]:
+        return self._jsonl("thumbnail")
+
     def emulator_pid(self) -> int | None:
         try:
             return int((self.root / "emulator.pid").read_text())
@@ -90,7 +99,8 @@ def fake(tmp_path: Path) -> Fake:
     (root / "device" / "data" / "local" / "tmp").mkdir(parents=True)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for name, script in (("emulator", "emulator.py"), ("adb", "adb.py"), ("Xvnc", "xvnc.py"), ("glxinfo", "glxinfo.py")):
+    scripts = (("emulator", "emulator.py"), ("adb", "adb.py"), ("Xvnc", "xvnc.py"), ("glxinfo", "glxinfo.py"), ("turnserver", "turnserver.py"))
+    for name, script in scripts:
         _wrapper(bin_dir / name, root, script)
     sdk = tmp_path / "sdk"
     (sdk / "system-images" / "android-35" / "google_apis_playstore" / "x86_64").mkdir(parents=True)
@@ -115,6 +125,7 @@ def cfg(tmp_path: Path, fake: Fake) -> Config:
         adb_bin=str(fake.bin / "adb"),
         xvnc_bin=str(fake.bin / "Xvnc"),
         glxinfo_bin=str(fake.bin / "glxinfo"),
+        turnserver_bin=str(fake.bin / "turnserver"),
         render_node=str(tmp_path / "no-render-node"),
     )
 

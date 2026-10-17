@@ -17,7 +17,9 @@ from PIL import Image
 from appliance import api, backend
 from appliance.auth import Auth
 from appliance.backend import Backend, LogBuffer
+from appliance.session import Hub
 from appliance.supervisor import Supervisor, Timing
+from appliance.turn import Turn
 from conftest import FAST
 
 ORIGIN = "http://127.0.0.1:6090"
@@ -38,7 +40,8 @@ class Clients:
 async def clients(cfg, timing: Timing = FAST) -> AsyncIterator[Clients]:
     sup = Supervisor(cfg, timing)
     auth = Auth(cfg)
-    app = api.create_app(Backend(sup, LogBuffer()), auth)
+    backend = Backend(sup, LogBuffer())
+    app = api.create_app(backend, auth, Hub(backend, Turn(cfg)))
     local = httpx.AsyncClient(transport=httpx.ASGITransport(app=api.local(app)), base_url="http://appliance")
     tcp = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=ORIGIN)
     try:
@@ -146,6 +149,22 @@ async def test_screenshot(cfg, fake):
         assert Image.open(io.BytesIO(r.content)).size == (540, 960)
         assert (await c.local.get("/api/v1/screenshot", params={"format": "gif"})).status_code == 400
         assert (await c.local.get("/api/v1/screenshot", params={"max_size": "x"})).status_code == 400
+
+
+async def test_passive_screenshot_only_looks(cfg, fake):
+    async with clients(cfg) as c:
+        # The dashboard's poster must not boot a stopped Android ...
+        r = await c.local.get("/api/v1/screenshot", params={"passive": 1})
+        assert r.status_code == 409 and r.json()["error"] == {"code": "conflict", "message": "android is stopped"}
+        assert fake.launches() == [] and c.sup.state.value == "stopped"
+        await c.sup.start()
+        # ... and a look is not use: it leaves the activity time alone.
+        before = c.sup._activity
+        r = await c.local.get("/api/v1/screenshot", params={"passive": 1, "format": "jpeg", "max_size": 480})
+        assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+        assert c.sup._activity == before
+        r = await c.local.get("/api/v1/screenshot")
+        assert r.status_code == 200 and c.sup._activity > before
 
 
 async def test_screenshot_falls_back_to_adb(cfg, fake):
@@ -444,6 +463,69 @@ async def test_login_form(cfg):
         assert r.status_code == 200 and "set-cookie" in r.headers
 
 
+async def test_the_login_page_is_styled_by_the_dashboard(cfg):
+    async with clients(cfg) as c:
+        page = (await c.tcp.get("/login")).text
+        for markup in (
+            '<link rel="stylesheet" href="/app.css">',
+            '<main class="login">',
+            "<h1>Android appliance</h1>",
+            '<form method="post" action="/login">',
+            '<label for="token">API token</label>',
+            '<input id="token" name="token" type="password" autocomplete="current-password" required autofocus>',
+            '<button type="submit">Sign in</button>',
+            '<p class="hint">',
+            "androidctl dashboard",
+        ):
+            assert markup in page, markup
+        # The policy allows no inline style or script.
+        assert "<style" not in page and "style=" not in page and "<script" not in page and 'class="error"' not in page
+        r = await c.tcp.post("/login", content="token=wrong", headers={"Content-Type": "application/x-www-form-urlencoded", "Origin": ORIGIN})
+        assert r.status_code == 401 and '<p class="error">Wrong token.</p>' in r.text and '<main class="login">' in r.text
+        r = await c.tcp.get("/login", params={"code": "expired"})
+        assert r.status_code == 401 and '<p class="error">This login link is invalid or expired.' in r.text
+        r = await c.tcp.post("/login", content=f"token={c.auth.token}", headers={"Content-Type": "application/x-www-form-urlencoded", "Origin": ORIGIN})
+        assert 'http-equiv="refresh"' in r.text and "<style" not in r.text and 'href="/app.css"' in r.text
+
+
+async def test_only_the_style_sheet_of_the_dashboard_is_public(cfg):
+    (cfg.web_dir / "js").mkdir(parents=True)
+    (cfg.web_dir / "index.html").write_text("<h1>dashboard</h1>")
+    (cfg.web_dir / "app.css").write_text("body{}")
+    (cfg.web_dir / "js" / "app.js").write_text("export {}")
+    async with clients(cfg) as c:
+        r = await c.tcp.get("/app.css")
+        assert r.status_code == 200 and r.headers["content-type"].startswith("text/css") and r.text == "body{}"
+        assert r.headers["content-security-policy"] == api.PAGE_POLICY
+        for path in ("/", "/index.html", "/js/app.js"):
+            r = await c.tcp.get(path)
+            assert (r.status_code, r.headers["location"]) == (303, "/login"), path
+        assert (await c.local.get("/js/app.js")).text == "export {}"
+
+
+async def test_logout_ends_the_session_in_the_browser(cfg):
+    async with clients(cfg) as c:
+        c.tcp.cookies.set("appliance_session", await login_with_link(c))
+        assert (await c.tcp.get("/api/v1/status")).status_code == 200
+        # A cookie needs our own Origin, as for every request that changes state.
+        assert (await c.tcp.post("/logout")).status_code == 403
+        assert (await c.tcp.post("/logout", headers={"Origin": "http://evil.example"})).status_code == 403
+        r = await c.tcp.post("/logout", headers={"Origin": ORIGIN})
+        assert (r.status_code, r.headers["location"]) == (303, "/login")
+        cookie = r.headers["set-cookie"]
+        assert cookie.startswith('appliance_session=""') or cookie.startswith("appliance_session=;")
+        assert "Max-Age=0" in cookie and "Path=/" in cookie and "HttpOnly" in cookie and "SameSite=strict" in cookie
+        assert r.headers["cache-control"] == "no-store"
+        c.tcp.cookies.clear()
+        assert (await c.tcp.get("/api/v1/status")).status_code == 401
+        # Without a session it is the login page again; with the token it is harmless.
+        r = await c.tcp.post("/logout")
+        assert (r.status_code, r.headers["location"]) == (303, "/login")
+        r = await c.tcp.post("/logout", headers=c.bearer())
+        assert r.status_code == 303
+        assert (await c.local.get("/logout")).status_code == 405
+
+
 async def test_dashboard_files(cfg):
     cfg.web_dir.mkdir()
     (cfg.web_dir / "index.html").write_text("<h1>dashboard</h1>")
@@ -577,9 +659,19 @@ async def test_responses_carry_security_headers(cfg, fake):
             await c.local.get("/"),
         ):
             assert r.headers["x-frame-options"] == "DENY", r.url
-            assert r.headers["content-security-policy"] == "frame-ancestors 'none'"
             assert r.headers["x-content-type-options"] == "nosniff"
-            assert r.headers["referrer-policy"] == "no-referrer"
+            assert r.headers["referrer-policy"] == "same-origin"
+        for r in (await c.tcp.get("/api/v1/health"), await c.tcp.get("/api/v1/status"), await c.local.get("/api/v1/status")):
+            assert r.headers["content-security-policy"] == "frame-ancestors 'none'", r.url
+        # The pages load nothing but their own files.
+        for r in (await c.tcp.get("/login"), await c.local.get("/")):
+            assert r.headers["content-security-policy"] == api.PAGE_POLICY, r.url
+        assert api.PAGE_POLICY == (
+            "default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; style-src 'self'; "
+            "script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        )
         assert (await c.local.get("/api/v1/logs")).headers["cache-control"] == "no-store"
         assert (await c.tcp.get("/login")).headers["cache-control"] == "no-store"
         assert (await c.local.get("/api/v1/screenshot")).headers["cache-control"] == "no-store"
+        # The dashboard's files are validated again each time.
+        assert (await c.local.get("/")).headers["cache-control"] == "no-cache"

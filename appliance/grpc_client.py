@@ -1,4 +1,4 @@
-"""Emulator gRPC: screenshots, clipboard, keys and the shared input stream."""
+"""Emulator gRPC: screenshots, clipboard, keys, the shared input stream and WebRTC signaling."""
 
 import asyncio
 import itertools
@@ -11,6 +11,9 @@ from . import _proto  # noqa: F401  (puts the generated modules on sys.path)
 
 import emulator_controller_pb2 as pb  # isort: skip
 import emulator_controller_pb2_grpc as pb_grpc  # isort: skip
+import ice_config_pb2 as ice_pb  # isort: skip
+import rtc_service_v2_pb2 as rtc_pb  # isort: skip
+import rtc_service_v2_pb2_grpc as rtc_grpc  # isort: skip
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +83,7 @@ class EmulatorGrpc:
         what keeps it out."""
         self.channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
         self.stub = pb_grpc.EmulatorControllerStub(self.channel)
+        self.rtc = rtc_grpc.RtcStub(self.channel)
         self._metadata: tuple[tuple[str, str], ...] = (("authorization", f"Bearer {token}"),) if token else ()
         self.input = InputStream(self.stub, self._metadata)
         self._key_lock = asyncio.Lock()
@@ -89,6 +93,13 @@ class EmulatorGrpc:
         """Return a PNG of the display and its size."""
         image = await self.stub.getScreenshot(pb.ImageFormat(format=pb.ImageFormat.PNG), timeout=20, metadata=self._metadata)
         return image.image, image.format.width, image.format.height
+
+    async def thumbnail(self, width: int, height: int) -> bytes:
+        """The raw RGB pixels of the display, scaled to fit width x height."""
+        image = await self.stub.getScreenshot(
+            pb.ImageFormat(format=pb.ImageFormat.RGB888, width=width, height=height), timeout=CALL_TIMEOUT, metadata=self._metadata
+        )
+        return image.image
 
     async def get_clipboard(self) -> str:
         return (await self.stub.getClipboard(empty_pb2.Empty(), timeout=CALL_TIMEOUT, metadata=self._metadata)).text
@@ -106,6 +117,25 @@ class EmulatorGrpc:
                 await self.stub.sendKey(event, timeout=CALL_TIMEOUT, metadata=self._metadata)
             finally:
                 self._last_key = loop.time()
+
+    async def request_rtc_stream(self, stun_url: str) -> str:
+        """Ask for a WebRTC stream and return its id.
+
+        Without an ICE configuration the emulator contacts Google's STUN
+        server, so the request always names one.
+        """
+        servers = ice_pb.IceServerConfig(ice_servers=[ice_pb.IceServerList(urls=[stun_url])])
+        request = rtc_pb.RtcStreamRequest(ice_server_config=servers)
+        response = await self.rtc.RequestRtcStream(request, timeout=CALL_TIMEOUT, metadata=self._metadata)
+        return response.id.guid
+
+    def receive_jsep(self, guid: str) -> grpc.aio.UnaryStreamCall:
+        """The messages of the emulator for a stream: JSON text in `jsep_msg.message`."""
+        return self.rtc.ReceiveJsepMessageStream(rtc_pb.ReceiveJsepMessageRequest(id=rtc_pb.Id(guid=guid)), metadata=self._metadata)
+
+    async def send_jsep(self, guid: str, message: str) -> None:
+        jsep = rtc_pb.JsepMsg(id=rtc_pb.Id(guid=guid), message=message)
+        await self.rtc.SendJsepMessage(rtc_pb.SendJsepMessageRequest(jsep_msg=jsep), timeout=CALL_TIMEOUT, metadata=self._metadata)
 
     async def status(self) -> pb.EmulatorStatus:
         return await self.stub.getStatus(empty_pb2.Empty(), timeout=CALL_TIMEOUT, metadata=self._metadata)

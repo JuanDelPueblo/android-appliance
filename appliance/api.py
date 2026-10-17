@@ -16,13 +16,16 @@ from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException
 from starlette.requests import HTTPConnection, Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
-from starlette.routing import BaseRoute, Mount, Route
+from starlette.routing import BaseRoute, Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.websockets import WebSocket
 
 from . import __version__
 from .auth import SESSION_COOKIE, SESSION_TTL, Auth
 from .backend import Backend, OperationError, compact
+from .config import HOST
+from .session import Hub, Session
 from .supervisor import LifecycleError
 
 log = logging.getLogger(__name__)
@@ -49,18 +52,27 @@ MAX_TIMEOUT = 24 * 3600
 # An upload leaves this much of the state disk free for the AVD.
 DISK_RESERVE = 1024**3
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
-PUBLIC_PATHS = (f"{API}/health", "/login")
+# The login page needs its style sheet before anybody is logged in.
+PUBLIC_PATHS = (f"{API}/health", "/login", "/app.css")
 # Set by the unix socket listener: its requests are trusted.
 LOCAL = "appliance.local"
 PRINCIPAL = "appliance.principal"
-# The pages carry no framing, sniffing or referrer; API answers and the
-# login are never cached.
+# The pages carry no framing, sniffing or referrer to other sites; API
+# answers and the login are never cached. The policy is "same-origin", not
+# "no-referrer": a browser puts "Origin: null" on a form post under
+# no-referrer, and the checks of login and logout would refuse it.
 SECURITY_HEADERS = {
     "x-frame-options": "DENY",
-    "content-security-policy": "frame-ancestors 'none'",
     "x-content-type-options": "nosniff",
-    "referrer-policy": "no-referrer",
+    "referrer-policy": "same-origin",
 }
+# The dashboard and the login page load nothing but their own files (and
+# blob: images, and the WebSocket of the same origin).
+PAGE_POLICY = (
+    "default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; style-src 'self'; "
+    "script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+)
+API_POLICY = "frame-ancestors 'none'"
 
 
 class ApiError(Exception):
@@ -98,11 +110,24 @@ def client_key(conn: HTTPConnection, trust_proxy: bool) -> str:
     return _forwarded(conn, "x-forwarded-for", trust_proxy) or (conn.client.host if conn.client else "unknown")
 
 
+def _host(conn: HTTPConnection, trust_proxy: bool) -> str:
+    return _forwarded(conn, "x-forwarded-host", trust_proxy) or conn.headers.get("host", "")
+
+
 def own_origin(conn: HTTPConnection, trust_proxy: bool) -> str:
     scheme = _forwarded(conn, "x-forwarded-proto", trust_proxy) or conn.url.scheme
     scheme = {"ws": "http", "wss": "https"}.get(scheme, scheme)
-    host = _forwarded(conn, "x-forwarded-host", trust_proxy) or conn.headers.get("host", "")
-    return f"{scheme}://{host}".lower()
+    return f"{scheme}://{_host(conn, trust_proxy)}".lower()
+
+
+def host_name(conn: HTTPConnection, trust_proxy: bool) -> str:
+    """The host name that the client used (no port, no brackets); empty
+    when the Host header is not a host name or an address."""
+    try:
+        name = urllib.parse.urlsplit(f"//{_host(conn, trust_proxy)}").hostname or ""
+    except ValueError:
+        return ""
+    return name if HOST.fullmatch(name) else ""
 
 
 class AuthMiddleware:
@@ -305,23 +330,24 @@ async def _send_file(path: Path) -> AsyncIterator[bytes]:
         path.unlink(missing_ok=True)
 
 
-def _page(title: str, body: str, status: int = 200) -> HTMLResponse:
+def _page(title: str, body: str, status: int = 200, head: str = "") -> HTMLResponse:
+    # The style sheet is the dashboard's: the policy allows no inline style.
     return HTMLResponse(
         f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(title)}</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1rem}}
-input{{width:100%;padding:.4rem;margin:.5rem 0}}button{{padding:.4rem 1rem}}.msg{{color:#b00}}</style>
-</head><body>{body}</body></html>
+<link rel="stylesheet" href="/app.css">{head}
+</head><body><main class="login">{body}</main></body></html>
 """,
         status,
     )
 
 
 class Api:
-    def __init__(self, backend: Backend, auth: Auth):
+    def __init__(self, backend: Backend, auth: Auth, hub: Hub):
         self.backend = backend
         self.auth = auth
+        self.hub = hub
         self.trust_proxy = auth.cfg.trust_proxy
 
     def _status(self, request: Request) -> Response:
@@ -382,7 +408,7 @@ class Api:
             raise ApiError("bad_request", "'format' must be png or jpeg")
         quality = _query_int(request, "quality", 85, 1, 100)
         max_size = _query_int(request, "max_size", 0, 16, 100000) or None
-        shot = await self.backend.screenshot(fmt, quality, max_size)
+        shot = await self.backend.screenshot(fmt, quality, max_size, _flag(request, "passive"))
         headers = {
             "X-Device-Width": str(shot.device_width),
             "X-Device-Height": str(shot.device_height),
@@ -531,18 +557,21 @@ class Api:
     async def rotate_token(self, request: Request) -> Response:
         self._local_only(request)
         token = self.auth.rotate()
+        # An open session holds the old token or cookie.
+        self.hub.end_sessions()
         log.info("the API token was rotated; dashboard sessions ended")
         return PlainTextResponse(token + "\n") if _as_text(request) else JSONResponse({"token": token})
 
     def _login_form(self, message: str = "", status: int = 200) -> HTMLResponse:
-        note = f'<p class="msg">{html.escape(message)}</p>' if message else ""
+        note = f'<p class="error">{html.escape(message)}</p>' if message else ""
         return _page(
-            "Android appliance: log in",
+            "Android appliance: sign in",
             f"""<h1>Android appliance</h1>{note}
 <form method="post" action="/login">
-<label>API token <input type="password" name="token" autocomplete="current-password" autofocus required></label>
-<button>Log in</button></form>
-<p>Print the token with <code>androidctl token</code>, or open a one-time link from <code>androidctl dashboard</code>.</p>""",
+<label for="token">API token</label>
+<input id="token" name="token" type="password" autocomplete="current-password" required autofocus>
+<button type="submit">Sign in</button></form>
+<p class="hint">Print the token with <code>androidctl token</code>, or open a one-time link from <code>androidctl dashboard</code>.</p>""",
             status,
         )
 
@@ -550,7 +579,11 @@ class Api:
         # Move on with a page, not a redirect: a SameSite=Strict cookie set
         # on a navigation from another site (a link in a terminal or chat)
         # is not sent on that navigation's redirect.
-        response = _page("Android appliance", '<meta http-equiv="refresh" content="0;url=/"><p><a href="/">Continue</a></p>')
+        response = _page(
+            "Android appliance",
+            '<p>Signed in. <a href="/">Continue</a></p>',
+            head='<meta http-equiv="refresh" content="0;url=/">',
+        )
         https = own_origin(request, self.trust_proxy).startswith("https:")
         response.set_cookie(
             SESSION_COOKIE, self.auth.new_session(), max_age=SESSION_TTL, path="/", secure=https, httponly=True, samesite="strict"
@@ -577,6 +610,15 @@ class Api:
             return self._login_form("Too many failed logins. Wait a minute.", 429)
         self.auth.failed(client)
         return self._login_form("Wrong token.", 401)
+
+    async def logout(self, request: Request) -> Response:
+        response = Response(status_code=303, headers={"Location": "/login"})
+        https = own_origin(request, self.trust_proxy).startswith("https:")
+        response.delete_cookie(SESSION_COOKIE, path="/", secure=https, httponly=True, samesite="strict")
+        return response
+
+    async def session(self, ws: WebSocket) -> None:
+        await Session(self.hub, ws, host_name(ws, self.trust_proxy)).run()
 
     async def placeholder(self, request: Request) -> Response:
         return _page(
@@ -615,11 +657,13 @@ class Api:
             r("/auth/login-link", self.login_link, "POST"),
             r("/auth/token", self.token, "GET"),
             r("/auth/token/rotate", self.rotate_token, "POST"),
+            WebSocketRoute("/session", self.session),
         ]
         routes: list[BaseRoute] = [
             Mount(API, routes=api),
             Route("/login", self.login_page, methods=["GET"]),
             Route("/login", self.login, methods=["POST"]),
+            Route("/logout", self.logout, methods=["POST"]),
         ]
         if (web_dir / "index.html").is_file():
             routes.append(Mount("/", StaticFiles(directory=web_dir, html=True)))
@@ -647,15 +691,20 @@ def hardened(app: ASGIApp) -> ASGIApp:
         if scope["type"] != "http":
             await app(scope, receive, send)
             return
-        private = scope["path"].startswith(API) or scope["path"] == "/login"
+        api = scope["path"].startswith(API)
+        private = api or scope["path"] in ("/login", "/logout")
 
         async def send_hardened(message: Any) -> None:
             if message["type"] == "http.response.start":
                 headers = MutableHeaders(scope=message)
                 for name, value in SECURITY_HEADERS.items():
                     headers.setdefault(name, value)
-                if private:
-                    headers.setdefault("cache-control", "no-store")
+                headers.setdefault("content-security-policy", API_POLICY if api else PAGE_POLICY)
+                # The dashboard's files are asked for again each time (a short
+                # 304): a browser that signed out is sent to the login page
+                # instead of showing the page from its cache, and an update
+                # takes effect at once.
+                headers.setdefault("cache-control", "no-store" if private else "no-cache")
             await send(message)
 
         await app(scope, receive, send_hardened)
@@ -663,8 +712,8 @@ def hardened(app: ASGIApp) -> ASGIApp:
     return wrapped
 
 
-def create_app(backend: Backend, auth: Auth) -> ASGIApp:
-    routes = Api(backend, auth).routes(backend.cfg.web_dir)
+def create_app(backend: Backend, auth: Auth, hub: Hub) -> ASGIApp:
+    routes = Api(backend, auth, hub).routes(backend.cfg.web_dir)
     handlers = {cls: _handle for cls in (ApiError, OperationError, LifecycleError, HTTPException, Exception)}
     app = Starlette(routes=routes, exception_handlers=handlers)  # type: ignore[arg-type]
     return hardened(AuthMiddleware(app, auth))

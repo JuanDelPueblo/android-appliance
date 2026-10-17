@@ -19,6 +19,13 @@ WIDTH, HEIGHT, DENSITY = 1080, 1920, 420
 SERIAL = "emulator-5554"
 ADB_SERVER_PORT = 5037
 GRPC_PORT = 8554
+# coturn listens on this port in the container. The host publishes it as
+# APPLIANCE_TURN_PORT, and the browser uses that port.
+TURN_PORT = 3478
+
+
+# A host name, an IPv4 address or an IPv6 address (without brackets or port).
+HOST = re.compile(r"[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?|[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*")
 
 
 class ConfigError(Exception):
@@ -40,6 +47,10 @@ class Config:
     # Where the host publishes the HTTP port; used for login links.
     listen_address: str = "127.0.0.1"
     port: int = 6090
+    # The TURN port that the host publishes, and the host name of the TURN
+    # URLs ("" means the host name of the page).
+    turn_port: int = 3478
+    turn_host: str = ""
     # Container-internal paths and programs. Tests and development runs
     # override them.
     http_port: int = 8080
@@ -52,6 +63,7 @@ class Config:
     adb_bin: str = ""
     xvnc_bin: str = "Xvnc"
     glxinfo_bin: str = "glxinfo"
+    turnserver_bin: str = "turnserver"
     # None: the first /dev/dri/renderD* node.
     render_node: str | None = None
 
@@ -179,6 +191,9 @@ def load(environ: Mapping[str, str] | None = None) -> Config:
     trust = get("APPLIANCE_TRUST_PROXY") or "0"
     if trust not in ("0", "1"):
         raise ConfigError(f"APPLIANCE_TRUST_PROXY must be 0 or 1, not '{trust}'")
+    turn_host = (get("APPLIANCE_TURN_HOST") or "").strip("[]")
+    if turn_host and not HOST.fullmatch(turn_host):
+        raise ConfigError(f"APPLIANCE_TURN_HOST must be a host name or an IP address without a port, not '{turn_host}'")
     api = get("APPLIANCE_API_LEVEL")
     sdk = Path(get("APPLIANCE_SDK_ROOT") or "/opt/android-sdk")
 
@@ -196,6 +211,8 @@ def load(environ: Mapping[str, str] | None = None) -> Config:
         trust_proxy=trust == "1",
         listen_address=get("APPLIANCE_LISTEN_ADDRESS") or "127.0.0.1",
         port=integer("APPLIANCE_PORT", 6090, 1),
+        turn_port=integer("APPLIANCE_TURN_PORT", 3478, 1),
+        turn_host=turn_host,
         http_port=integer("APPLIANCE_HTTP_PORT", 8080, 0),
         data_dir=Path(get("APPLIANCE_DATA_DIR") or "/data"),
         run_dir=Path(get("APPLIANCE_RUN_DIR") or "/run/appliance"),
@@ -206,5 +223,6 @@ def load(environ: Mapping[str, str] | None = None) -> Config:
         adb_bin=get("APPLIANCE_ADB") or str(sdk / "platform-tools" / "adb"),
         xvnc_bin=get("APPLIANCE_XVNC") or "Xvnc",
         glxinfo_bin=get("APPLIANCE_GLXINFO") or "glxinfo",
+        turnserver_bin=get("APPLIANCE_TURNSERVER") or "turnserver",
         render_node=get("APPLIANCE_RENDER_NODE"),
     )

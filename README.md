@@ -4,8 +4,9 @@ A NixOS module, a standalone installer for systemd hosts (Fedora
 Server and similar), and a Hermes plugin for one persistent Android
 Emulator device. Android cold boots on demand and shuts down when idle, keeping
 its apps, accounts and userdata. Suspend/resume and Quick Boot are removed.
-`androidctl` is the stable interface for humans and agents. A browser shows the device screen through
-scrcpy and noVNC.
+`androidctl` is the stable interface for humans and agents. In v1 a browser
+shows the device screen through scrcpy and noVNC. Version 2 (see "Install v2")
+replaces them with the emulator's own WebRTC video and a dashboard.
 
 ## Architecture
 
@@ -222,6 +223,39 @@ If the daemon does not come up after the restart (for example because of
 a wrong value in the configuration), `install.sh` fails with the last
 lines of the journal. After an update, `./install.sh --rollback` goes
 back to the previous image.
+
+### The v2 dashboard
+
+`androidctl dashboard` prints a one-time link that signs a browser in (it
+works once, within 2 minutes). The login page also takes the API token
+(`androidctl token`). The dashboard shows the device display as live video,
+with Start, Stop and Restart, the state of Android and the state of the
+connection. It never starts Android by itself: a stopped Android shows a
+Start button.
+
+- **Video** is the emulator's own WebRTC stream (VP8, 1080x1920), relayed
+  by the TURN server in the container. The browser connects to one TURN
+  port (`APPLIANCE_TURN_PORT`, 3478 by default) and to the HTTP port, and
+  to nothing else. A frozen video, a lost connection, a restarted daemon or
+  a crash of Android bring the video back by themselves.
+- **Input** works as on a phone. The mouse is a finger (the right button is
+  Back, the wheel scrolls), touch screens and pens work, and the keyboard
+  goes to Android while the display has the focus (Ctrl+Alt+K gives it back
+  to the page). Text from an IME, a paste and characters outside ASCII
+  arrive exactly. The toolbar has Back, Home, Recents, Power (hold it for
+  the power menu) and the volume keys. On a touch screen the keyboard
+  button raises the on-screen keyboard.
+- **Remote access**: the default publishes both ports on `127.0.0.1` only.
+  For another machine, publish them with `APPLIANCE_LISTEN_ADDRESS`, or put
+  a reverse proxy with TLS in front of the HTTP port
+  (`APPLIANCE_TRUST_PROXY=1`) and make the TURN port (UDP and TCP) reachable
+  by the browser. The TURN URLs use the host name of the page; set
+  `APPLIANCE_TURN_HOST` when the name of the TURN server differs. The TURN
+  server relays only to the container itself, and only with the credentials
+  that a signed-in dashboard session gets.
+
+`docs/ARCHITECTURE.md` (sections WebRTC, WebSocket session and Dashboard)
+has the protocol and the measurements.
 
 ### Security of the v2 container
 
@@ -628,6 +662,8 @@ nix build .#integration-test -L    # real emulator in a NixOS VM (KVM, nested)
                                    # staged install, plugin and dashboard tests
 ./tests/smoke.sh                   # installed v1 host with KVM: real emulator
 make e2e                           # v2 with KVM and Podman: tests/e2e/lifecycle.sh
+make e2e-webrtc                    # v2 dashboard in Chromium against a real
+                                   # Android: tests/e2e/webrtc.sh
 hermes plugins validate .          # Hermes admission checks
 hermes plugins doctor . --ci       # Hermes runtime contract checks
 ```
@@ -642,11 +678,29 @@ and the dashboard tests. It also runs the v2 tests: `androidctl` and
 It reports a SKIP when a tool such as shellcheck, node or a Python
 module is not installed.
 
+The dashboard has its own tests in `tests/web`: unit tests of its modules
+(`node --test tests/web/unit/*.test.mjs`) and UI tests in Chromium against a
+fake appliance and against the real daemon with a fake emulator. The UI
+tests need Playwright: run `npm ci` in `tests/e2e` and `npx playwright
+install chromium`, or point `AA_PLAYWRIGHT` at a `node_modules` directory
+that has `playwright`. Without it `run-tests.sh` reports a SKIP.
+
 `tests/e2e/lifecycle.sh` (`make e2e`) tests v2 on a real host. It
 installs its own instance `aa-e2e` from the built image, boots Android,
 runs the operations, checks that userdata survives a stop, a container
 recreation and a crash, checks the idle stop, and removes the instance
 again. It takes about 6 minutes.
+
+`tests/e2e/webrtc.sh` tests the dashboard end to end. It installs its own
+instance `aa-e2e-rtc` from the built image, drives the dashboard in headless
+Chromium and checks every effect against Android through `androidctl` (UI
+dumps, `dumpsys`, `getevent`): login, the first frame, mouse, touch,
+keyboard and hardware buttons, the lifecycle buttons, reconnection after a
+closed socket, a lost network, a restarted TURN server, a frozen video, a
+crash of Android and a restart of the daemon, two viewers, a hidden tab,
+the idle stop, access under another host name, and what the TURN server
+refuses. It prints the latency, frame rate and CPU it measured. A run takes
+about 20 minutes. It needs Node.js and Playwright on the host (see above).
 
 `nix flake check` runs:
 

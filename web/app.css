@@ -1,0 +1,770 @@
+/* The dashboard and the login page. Plain CSS: no build step, no assets
+   from other origins (the page runs under default-src 'self'). */
+
+:root {
+  color-scheme: light dark;
+  --bg: #e9edf0;
+  --surface: #ffffff;
+  --surface-2: #f3f6f8;
+  --line: #d6dde2;
+  --text: #141c22;
+  --muted: #55646e;
+  --accent: #0a7d4b;
+  --on-accent: #ffffff;
+  --accent-soft: #d8f1e4;
+  --ok: #15915a;
+  --pending: #b9770e;
+  --off: #7a8791;
+  --error: #c7313d;
+  --focus: #1b6fe0;
+  --shadow: 0 1px 2px rgb(20 28 34 / 0.08), 0 10px 30px rgb(20 28 34 / 0.12);
+  --radius: 14px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1114;
+    --surface: #161b20;
+    --surface-2: #1c2329;
+    --line: #2b343b;
+    --text: #e7ecef;
+    --muted: #94a2ac;
+    --accent: #3ddc84;
+    --on-accent: #04210f;
+    --accent-soft: #17321f;
+    --ok: #3ddc84;
+    --pending: #f0b44c;
+    --off: #70808b;
+    --error: #ff6b78;
+    --focus: #6aa7ff;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 10px 30px rgb(0 0 0 / 0.45);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Icons are masks, so that they take the color of the text. */
+.icon {
+  display: inline-block;
+  flex: none;
+  width: 1.4rem;
+  height: 1.4rem;
+  background-color: currentColor;
+  mask: var(--icon) center / contain no-repeat;
+}
+
+.i-back { --icon: url('/icons/back.svg'); }
+.i-home { --icon: url('/icons/home.svg'); }
+.i-recents { --icon: url('/icons/recents.svg'); }
+.i-power { --icon: url('/icons/power.svg'); }
+.i-volume-down { --icon: url('/icons/volume-down.svg'); }
+.i-volume-up { --icon: url('/icons/volume-up.svg'); }
+.i-keyboard { --icon: url('/icons/keyboard.svg'); }
+.i-sliders { --icon: url('/icons/sliders.svg'); }
+.i-play { --icon: url('/icons/play.svg'); }
+.i-stop { --icon: url('/icons/stop.svg'); }
+.i-restart { --icon: url('/icons/restart.svg'); }
+.i-sign-out { --icon: url('/icons/sign-out.svg'); }
+.i-close { --icon: url('/icons/close.svg'); }
+.i-logo { --icon: url('/icons/logo.svg'); }
+
+/* Buttons */
+
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  min-height: 2.5rem;
+  padding: 0.45rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--muted);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button .icon {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+button.primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 650;
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--accent);
+  filter: brightness(1.08);
+}
+
+button.danger {
+  border-color: transparent;
+  background: var(--error);
+  color: #fff;
+}
+
+button.danger:hover:not(:disabled) {
+  background: var(--error);
+  filter: brightness(1.1);
+}
+
+/* Layout: the stage (device and buttons) and the panel */
+
+.app {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 22.5rem;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.stage {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 0.9rem;
+  min-width: 0;
+  min-height: 0;
+  padding: 1.5rem 1.5rem 1.1rem;
+}
+
+/* The viewport is the box the device may fill. The device takes the
+   largest size of its aspect ratio that fits (container query units). */
+.viewport {
+  display: grid;
+  place-items: center;
+  min-height: 0;
+  container-type: size;
+}
+
+.device {
+  width: min(100cqw, calc(100cqh * var(--ratio, 0.5625)));
+  aspect-ratio: var(--ratio, 0.5625);
+  border-radius: 1.6rem;
+  background: #000;
+  box-shadow: var(--shadow), 0 0 0 1px var(--line);
+}
+
+.screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: inherit;
+  background: #000;
+  color: #f1f5f7;
+  /* Touch, pen and mouse go to Android, not to the page. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.screen:focus-within {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.screen > video,
+.screen > .poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.screen > video {
+  opacity: 0;
+}
+
+.screen[data-frame='true'] > video {
+  opacity: 1;
+}
+
+/* The target of the keyboard focus and of text input. */
+.sink {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  resize: none;
+  pointer-events: none;
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: rgb(8 12 15 / 0.72);
+  backdrop-filter: blur(6px);
+  text-align: center;
+}
+
+.overlay-card {
+  display: grid;
+  justify-items: center;
+  gap: 0.6rem;
+  max-width: 17rem;
+}
+
+.overlay-card h2 {
+  font-size: 1.2rem;
+  font-weight: 650;
+}
+
+.overlay-card p {
+  color: #b9c6ce;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.overlay-card .primary {
+  margin-top: 0.6rem;
+  min-height: 2.9rem;
+  padding-inline: 1.4rem;
+  font-size: 1rem;
+}
+
+.spinner {
+  width: 2rem;
+  height: 2rem;
+  border: 3px solid rgb(255 255 255 / 0.22);
+  border-top-color: #3ddc84;
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.pill {
+  position: absolute;
+  top: 0.75rem;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0.25rem 0.8rem;
+  border-radius: 999px;
+  background: rgb(8 12 15 / 0.72);
+  backdrop-filter: blur(6px);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+/* The toolbar: the hardware buttons, and the keyboard and panel toggles */
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+}
+
+.group {
+  display: flex;
+  gap: 0.15rem;
+  padding: 0.25rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgb(20 28 34 / 0.06);
+}
+
+.tool {
+  position: relative;
+  width: 2.75rem;
+  min-height: 2.75rem;
+  height: 2.75rem;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  /* A hold must not turn into a scroll or a context menu. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.tool .icon {
+  width: 1.4rem;
+  height: 1.4rem;
+}
+
+.tool:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.tool:active:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.tool[aria-pressed='true'] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.panel-toggle,
+.close {
+  display: none;
+}
+
+.badge {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  width: 0.7rem;
+  height: 0.7rem;
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+}
+
+/* State colors */
+
+[data-tone='ok'] { background: var(--ok); }
+[data-tone='pending'] { background: var(--pending); }
+[data-tone='off'] { background: var(--off); }
+[data-tone='error'] { background: var(--error); }
+
+/* The panel */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  min-height: 0;
+  padding: 1.1rem;
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+}
+
+/* Only the cards scroll; the header and Sign out stay in view. */
+.panel-body {
+  display: grid;
+  flex: 1;
+  align-content: start;
+  gap: 0.85rem;
+  min-height: 0;
+  margin: 0 -0.35rem;
+  padding: 0 0.35rem;
+  overflow-y: auto;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.panel-head h1 {
+  flex: 1;
+  font-size: 1.1rem;
+  font-weight: 650;
+}
+
+.brand {
+  width: 1.9rem;
+  height: 1.9rem;
+  color: var(--accent);
+}
+
+.card {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.card h2 {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.state {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 1.2rem;
+  font-weight: 650;
+}
+
+.dot {
+  flex: none;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 50%;
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+}
+
+.actions button {
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.55rem 0.25rem;
+  font-size: 0.82rem;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+button.small {
+  min-height: 2rem;
+  padding: 0.2rem 0.65rem;
+  font-size: 0.82rem;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 1rem;
+  margin: 0;
+  font-size: 0.86rem;
+}
+
+.facts dt {
+  color: var(--muted);
+}
+
+.facts dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.problem {
+  padding: 0.5rem 0.7rem;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--error) 14%, transparent);
+  color: var(--error);
+  font-size: 0.88rem;
+}
+
+.failure {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.7rem;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  font-size: 0.88rem;
+}
+
+.failure strong {
+  color: var(--error);
+}
+
+.failure summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.failure pre {
+  max-height: 12rem;
+  margin: 0.5rem 0 0;
+  padding: 0.6rem;
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--surface);
+  font: 0.75rem/1.4 ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.signout button {
+  width: 100%;
+}
+
+.scrim {
+  display: none;
+}
+
+dialog {
+  width: min(22rem, calc(100vw - 2rem));
+  padding: 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+dialog::backdrop {
+  background: rgb(5 8 10 / 0.55);
+}
+
+dialog h2 {
+  margin-bottom: 0.4rem;
+  font-size: 1.1rem;
+}
+
+dialog p {
+  margin-bottom: 1.1rem;
+  color: var(--muted);
+}
+
+dialog .actions {
+  grid-template-columns: 1fr 1fr;
+}
+
+dialog .actions button {
+  flex-direction: row;
+  font-size: 0.95rem;
+}
+
+/* Narrow screens: the device fills the screen, a bar of buttons below it,
+   and the panel is a drawer. */
+
+@media (max-width: 899px) {
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .stage {
+    gap: 0;
+    padding: 0;
+  }
+
+  /* What the device does not fill is black, like the bars of a video. */
+  .viewport {
+    background: #000;
+  }
+
+  .device {
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .screen:focus-within {
+    outline-offset: -3px;
+  }
+
+  .toolbar {
+    flex-wrap: nowrap;
+    justify-content: space-between;
+    gap: 0;
+    padding: 0.3rem 0.5rem calc(0.3rem + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--line);
+    background: var(--surface);
+  }
+
+  .group {
+    display: contents;
+  }
+
+  .tool .icon {
+    width: 1.5rem;
+    height: 1.5rem;
+  }
+
+  .panel-toggle,
+  .close {
+    display: inline-flex;
+  }
+
+  .panel {
+    position: fixed;
+    inset: 0 0 0 auto;
+    z-index: 20;
+    width: min(24rem, 92vw);
+    visibility: hidden;
+    transform: translateX(100%);
+    transition: transform 0.2s ease, visibility 0s linear 0.2s;
+    box-shadow: var(--shadow);
+  }
+
+  .app[data-drawer='open'] .panel {
+    visibility: visible;
+    transform: none;
+    transition: transform 0.2s ease;
+  }
+
+  .scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    display: block;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: rgb(5 8 10 / 0.55);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+  }
+
+  .app[data-drawer='open'] .scrim {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+/* A phone on its side: the buttons go to the right of the display. */
+
+@media (max-width: 899px) and (max-height: 520px) and (orientation: landscape) {
+  .stage {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .toolbar {
+    flex-direction: column;
+    padding: 0.3rem calc(0.3rem + env(safe-area-inset-right)) 0.3rem 0.3rem;
+    border-top: 0;
+    border-left: 1px solid var(--line);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 3s;
+  }
+
+  .panel,
+  .scrim {
+    transition: none;
+  }
+}
+
+/* The login page, rendered by the daemon. */
+
+.login {
+  display: grid;
+  align-content: center;
+  gap: 0.9rem;
+  max-width: 24rem;
+  min-height: 100vh;
+  min-height: 100dvh;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+.login h1 {
+  font-size: 1.5rem;
+  font-weight: 650;
+}
+
+.login form {
+  display: grid;
+  gap: 0.6rem;
+  padding: 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.login label {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.login input {
+  width: 100%;
+  min-height: 2.6rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+}
+
+.login button {
+  min-height: 2.8rem;
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 650;
+}
+
+.login .error {
+  padding: 0.6rem 0.8rem;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--error) 14%, transparent);
+  color: var(--error);
+}
+
+.login .hint {
+  color: var(--muted);
+  font-size: 0.85rem;
+}

@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#e9edf0" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0d1114" media="(prefers-color-scheme: dark)">
+  <title>Android appliance</title>
+  <link rel="icon" href="/icons/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css">
+  <script type="module" src="/js/main.js"></script>
+</head>
+<body>
+  <div class="app" id="app" data-drawer="closed">
+    <main class="stage">
+      <div class="viewport" id="viewport">
+        <div class="device" id="device">
+          <div class="screen" id="screen" role="group" aria-label="Android display">
+            <img class="poster" id="poster" alt="" draggable="false" hidden>
+            <video id="video" muted playsinline autoplay disablepictureinpicture></video>
+            <!-- Holds the keyboard focus and receives composed and pasted text. -->
+            <textarea class="sink" id="sink" aria-label="Keyboard input for Android" aria-describedby="sink-help" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" inputmode="none" rows="1"></textarea>
+            <p class="sr-only" id="sink-help">Keys go to Android. Press Control, Alt and K to leave.</p>
+            <div class="overlay" id="overlay" hidden>
+              <div class="overlay-card">
+                <span class="spinner" id="overlay-spinner" aria-hidden="true"></span>
+                <h2 id="overlay-title"></h2>
+                <p id="overlay-detail"></p>
+                <button type="button" class="primary" id="overlay-start"><span class="icon i-play" aria-hidden="true"></span>Start Android</button>
+              </div>
+            </div>
+            <p class="pill" id="video-pill" role="status" hidden></p>
+          </div>
+        </div>
+      </div>
+      <div class="toolbar" role="toolbar" aria-label="Device buttons" id="toolbar">
+        <div class="group">
+          <button type="button" class="tool" data-button="BACK" aria-label="Back" title="Back"><span class="icon i-back" aria-hidden="true"></span></button>
+          <button type="button" class="tool" data-button="HOME" aria-label="Home" title="Home"><span class="icon i-home" aria-hidden="true"></span></button>
+          <button type="button" class="tool" data-button="APP_SWITCH" aria-label="Recents" title="Recents"><span class="icon i-recents" aria-hidden="true"></span></button>
+        </div>
+        <div class="group">
+          <button type="button" class="tool" data-button="POWER" aria-label="Power" title="Power. Press and hold, as on a phone."><span class="icon i-power" aria-hidden="true"></span></button>
+          <button type="button" class="tool" data-button="VOLUME_DOWN" aria-label="Volume down" title="Volume down"><span class="icon i-volume-down" aria-hidden="true"></span></button>
+          <button type="button" class="tool" data-button="VOLUME_UP" aria-label="Volume up" title="Volume up"><span class="icon i-volume-up" aria-hidden="true"></span></button>
+        </div>
+        <div class="group">
+          <button type="button" class="tool" id="keyboard-toggle" aria-pressed="true" aria-label="Keyboard capture" title="Keyboard capture. Ctrl+Alt+K turns it off."><span class="icon i-keyboard" aria-hidden="true"></span></button>
+          <button type="button" class="tool panel-toggle" id="panel-toggle" aria-expanded="false" aria-controls="panel" aria-label="Status and controls" title="Status and controls"><span class="icon i-sliders" aria-hidden="true"></span><span class="badge" id="panel-badge" data-tone="off"></span></button>
+        </div>
+      </div>
+    </main>
+
+    <aside class="panel" id="panel" aria-label="Status and controls">
+      <header class="panel-head">
+        <span class="icon i-logo brand" aria-hidden="true"></span>
+        <h1>Android appliance</h1>
+        <button type="button" class="tool close" id="panel-close" aria-label="Close"><span class="icon i-close" aria-hidden="true"></span></button>
+      </header>
+
+      <div class="panel-body">
+        <section class="card" aria-labelledby="device-title">
+          <h2 id="device-title">Device</h2>
+          <p class="state" role="status"><span class="dot" id="state-dot" data-tone="off"></span><span id="state-text">Connecting</span></p>
+          <div class="actions">
+            <button type="button" id="start"><span class="icon i-play" aria-hidden="true"></span>Start</button>
+            <button type="button" id="stop"><span class="icon i-stop" aria-hidden="true"></span>Stop</button>
+            <button type="button" id="restart"><span class="icon i-restart" aria-hidden="true"></span>Restart</button>
+          </div>
+          <p class="problem" id="action-error" role="alert" hidden></p>
+          <dl class="facts" id="device-facts"></dl>
+          <div class="failure" id="failure" hidden>
+            <p><strong id="failure-kind"></strong> <span id="failure-message"></span></p>
+            <details>
+              <summary>Log tail</summary>
+              <pre id="failure-log" tabindex="0"></pre>
+            </details>
+          </div>
+        </section>
+
+        <section class="card" aria-labelledby="connection-title">
+          <div class="card-head">
+            <h2 id="connection-title">Connection</h2>
+            <button type="button" class="small" id="reconnect"><span class="icon i-restart" aria-hidden="true"></span>Reconnect</button>
+          </div>
+          <dl class="facts" id="connection-facts"></dl>
+        </section>
+      </div>
+
+      <form class="signout" method="post" action="/logout">
+        <button type="submit"><span class="icon i-sign-out" aria-hidden="true"></span>Sign out</button>
+      </form>
+    </aside>
+    <button type="button" class="scrim" id="scrim" tabindex="-1" aria-label="Close the panel"></button>
+  </div>
+
+  <dialog id="confirm" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-text"></p>
+      <div class="actions">
+        <button value="cancel" autofocus>Cancel</button>
+        <button value="confirm" class="danger" id="confirm-ok">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

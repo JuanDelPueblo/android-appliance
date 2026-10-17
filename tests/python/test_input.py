@@ -293,3 +293,206 @@ async def test_closed_input_stream_refuses_sends():
             await stub.get_clipboard()
     finally:
         await server.stop(0)
+
+
+# Browser input
+
+
+def key_fields(event: pb.KeyboardEvent) -> tuple:
+    return (event.key, event.keyCode, pb.KeyboardEvent.KeyEventType.Name(event.eventType))
+
+
+@pytest.mark.parametrize(
+    "key, action, expected",
+    [
+        ("a", "down", ("a", 0, "keypress")),
+        ("a", "press", ("a", 0, "keypress")),
+        ("a", "up", None),
+        ("Z", "down", ("Z", 0, "keypress")),
+        ("~", "down", ("~", 0, "keypress")),
+        (" ", "down", (" ", 0, "keypress")),
+        ("Enter", "down", ("Enter", 0, "keydown")),
+        ("Enter", "up", ("Enter", 0, "keyup")),
+        ("Enter", "press", ("Enter", 0, "keypress")),
+        ("Backspace", "down", ("Backspace", 0, "keydown")),
+        ("ArrowLeft", "press", ("ArrowLeft", 0, "keypress")),
+        ("F12", "down", ("F12", 0, "keydown")),
+        ("Shift", "down", ("Shift", 0, "keydown")),
+        # W3C Home moves the text cursor; the Android button is GoHome.
+        ("Home", "press", ("Home", 0, "keypress")),
+        ("BrowserHome", "press", ("GoHome", 0, "keypress")),
+        ("BrowserBack", "press", ("BrowserBack", 0, "keypress")),
+        # Menu and ContextMenu do nothing as W3C names; evdev 139 does.
+        ("ContextMenu", "down", ("", 139, "keydown")),
+        ("Menu", "up", ("", 139, "keyup")),
+        ("Menu", "press", ("", 139, "keypress")),
+        ("CapsLock", "down", None),
+        ("CapsLock", "up", None),
+        ("Dead", "down", None),
+        ("Process", "down", None),
+        ("Unidentified", "press", None),
+        # No key event carries these.
+        ("​", "down", None),
+    ],
+)
+def test_browser_keys(key, action, expected):
+    event = input.browser_key(key, action)
+    assert (event if event is None else key_fields(event)) == expected
+
+
+def test_browser_keys_outside_ascii_are_pasted():
+    assert input.browser_key("é", "down") == "é"
+    assert input.browser_key("日", "press") == "日"
+    assert input.browser_key("😀", "down") == "😀"
+    assert input.browser_key("é", "up") is None
+
+
+def test_a_held_named_key_is_not_pressed_again_but_a_character_is():
+    assert input.browser_key("Enter", "down", repeat=True) is None
+    assert input.browser_key("Enter", "up", repeat=True) is not None
+    assert input.browser_key("a", "down", repeat=True) is not None
+
+
+def test_key_names():
+    assert all(input.valid_key(k) for k in ("a", "é", "Enter", "ArrowUp", "F12", " "))
+    assert not any(input.valid_key(k) for k in ("", "Arrow Up", "x" * 33, "Enter;", "a\n"))
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("HOME", ("GoHome", 0)),
+        ("BACK", ("GoBack", 0)),
+        ("APP_SWITCH", ("AppSwitch", 0)),
+        ("POWER", ("Power", 0)),
+        ("VOLUME_UP", ("AudioVolumeUp", 0)),
+        ("VOLUME_DOWN", ("AudioVolumeDown", 0)),
+        ("MENU", ("", 139)),
+    ],
+)
+def test_buttons(name, expected):
+    assert name in input.BUTTONS
+    for action in ("down", "up", "press"):
+        event = input.button_key(name, action)
+        assert key_fields(event)[:2] == expected and key_fields(event)[2] == {"down": "keydown", "up": "keyup", "press": "keypress"}[action]
+    assert input.button_key(name, "down", repeat=True) is None
+
+
+def test_contact_pressure_and_clamping():
+    c = input.contact(7, -3.4, 5000, 0.5)
+    assert (c.x, c.y, c.identifier, c.pressure) == (0, 1919, 7, 512)
+    assert input.contact(1, 10, 10, 1).pressure == 1024
+    assert input.contact(1, 10, 10, 7).pressure == 1024
+    assert input.contact(1, 10, 10, 0.0001).pressure == 1
+    assert input.contact(1, 10, 10, 0).pressure == 0
+
+
+def pointers() -> input.Pointers:
+    return input.Pointers(itertools.count(100).__next__)
+
+
+def points(event: pb.InputEvent | None) -> list[tuple]:
+    return [] if event is None else [(t.x, t.y, t.identifier, t.pressure) for t in event.touch_event.touches]
+
+
+def test_pointer_contacts_get_their_own_identifiers():
+    p = pointers()
+    assert points(p.touches([("a", 10, 20, 1), (5, 30, 40, 0.5)])) == [(10, 20, 100, 1024), (30, 40, 101, 512)]
+    assert points(p.touches([("a", 11, 21, 1)])) == [(11, 21, 100, 1024)]
+    # The id 5 and the id "5" are two fingers.
+    assert points(p.touches([("5", 1, 1, 1)])) == [(1, 1, 102, 1024)]
+    assert points(p.touches([("a", 12, 22, 0), (5, 31, 41, 0)])) == [(12, 22, 100, 0), (31, 41, 101, 0)]
+    # A lifted id is free again, as a new contact; a lift of an unknown id is nothing.
+    assert points(p.touches([("a", 9, 9, 1)])) == [(9, 9, 103, 1024)]
+    assert p.touches([("zz", 1, 1, 0)]) is None
+    assert p.touches([]) is None
+
+
+def test_pointer_contacts_are_limited():
+    p = pointers()
+    assert len(points(p.touches([(i, i, i, 1) for i in range(input.MAX_CONTACTS)]))) == 10
+    assert p.touches([(10, 1, 1, 1)]) is None
+    assert points(p.touches([(3, 1, 1, 0)])) == [(1, 1, 103, 0)]
+    assert len(points(p.touches([(10, 1, 1, 1)]))) == 1
+
+
+def test_the_release_lifts_every_contact_where_it_was_last():
+    p = pointers()
+    p.touches([("a", 10, 20, 1), ("b", 30, 40, 1)])
+    p.touches([("a", 15, 25, 1)])
+    p.mouse(50, 60, 1)
+    assert sorted(points(p.release())) == [(15, 25, 100, 0), (30, 40, 101, 0), (50, 60, 102, 0)]
+    assert p.release() is None
+
+
+def test_forget_drops_the_contacts_without_lifting_them():
+    p = pointers()
+    p.touches([("a", 10, 20, 1)])
+    p.forget()
+    assert p.release() is None and p.touches([("a", 1, 1, 0)]) is None
+
+
+def test_the_mouse_is_one_finger():
+    p = pointers()
+    assert p.mouse(5, 5, 0) == (None, False)
+    event, back = p.mouse(100, 200, 1)
+    assert points(event) == [(100, 200, 100, 1024)] and not back
+    assert points(p.mouse(110, 210, 1)[0]) == [(110, 210, 100, 1024)]
+    assert points(p.mouse(110, 210, 0)[0]) == [(110, 210, 100, 0)]
+    assert p.mouse(120, 220, 0) == (None, False)
+    # The next press is a new finger.
+    assert points(p.mouse(1, 1, 1)[0]) == [(1, 1, 101, 1024)]
+
+
+def test_the_right_button_is_back_once_for_each_press():
+    p = pointers()
+    assert p.mouse(1, 1, 2) == (None, True)
+    assert p.mouse(2, 2, 2) == (None, False)
+    assert p.mouse(2, 2, 0) == (None, False)
+    assert p.mouse(2, 2, 2) == (None, True)
+    # Both buttons: a finger and Back. The middle button is nothing.
+    assert p.mouse(2, 2, 0) == (None, False)
+    event, back = p.mouse(3, 3, 0b011)
+    assert points(event) == [(3, 3, 100, 1024)] and back is True
+    event, back = p.mouse(3, 3, 0b100)
+    assert points(event) == [(3, 3, 100, 0)] and back is False
+
+
+def test_a_mouse_and_a_finger_share_the_contact_limit():
+    p = pointers()
+    p.touches([(i, 1, 1, 1) for i in range(10)])
+    assert p.mouse(5, 5, 1) == (None, False)
+
+
+def test_a_wheel_notch_drags_against_the_wheel():
+    steps = input.wheel(9, 540, 960, 0, 120)
+    assert [(s.event.touch_event.touches[0].x, s.event.touch_event.touches[0].pressure) for s in steps][0] == (540, 1024)
+    ys = [s.event.touch_event.touches[0].y for s in steps]
+    assert ys[0] == 960 and ys[-1] == 960 - 168 and ys == sorted(ys, reverse=True)
+    assert [s.event.touch_event.touches[0].pressure for s in steps] == [1024] * (len(steps) - 1) + [0]
+    # 120 ms of moves at 60 Hz, then the hold of 80 ms before the lift.
+    assert abs(sum(s.delay for s in steps[:-1]) - 0.12) < 1e-9 and steps[-1].delay == 0.08
+    # Up and to the right with a negative delta; sideways with dx.
+    last = input.wheel(9, 500, 900, -120, -120)[-1].event.touch_event.touches[0]
+    assert (last.x, last.y) == (500 + 168, 900 + 168)
+    assert input.wheel(9, 500, 900, 120, 0)[-1].event.touch_event.touches[0].x == 500 - 168
+
+
+def test_a_wheel_drag_is_bounded_and_never_a_tap():
+    far = input.wheel(1, 540, 1500, 0, 100000)
+    assert far[-1].event.touch_event.touches[0].y == 1500 - input.MAX_WHEEL_PX
+    assert input.wheel(1, 540, 960, 0, 10) == []
+    assert input.wheel(1, 540, 960, 0, 0) == []
+    assert input.wheel(1, 540, 960, 3, 4) == []
+    assert input.wheel(1, 540, 960, 0, 25)
+
+
+def test_a_wheel_drag_at_the_edge_starts_further_in():
+    steps = input.wheel(1, 540, 10, 0, 120)
+    first, last = steps[0].event.touch_event.touches[0], steps[-1].event.touch_event.touches[0]
+    assert (first.y, last.y) == (168, 0)
+    steps = input.wheel(1, 1070, 960, -120, 0)
+    first, last = steps[0].event.touch_event.touches[0], steps[-1].event.touch_event.touches[0]
+    assert last.x == 1079 and first.x == 1079 - 168
+    # Outside the frame counts as the edge.
+    assert input.wheel(1, -500, 99999, 0, -120)[0].event.touch_event.touches[0].y == 1919 - 168

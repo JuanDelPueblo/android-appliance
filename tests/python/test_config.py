@@ -19,6 +19,7 @@ def test_defaults():
     assert cfg.adb_bin == "/opt/android-sdk/platform-tools/adb"
     assert cfg.registry_dir == Path("/tmp/appliance/avd")
     assert cfg.lock_file == Path("/data/appliance/daemon.lock")
+    assert (cfg.turn_port, cfg.turn_host, cfg.turnserver_bin) == (3478, "", "turnserver")
 
 
 def test_values_and_empty_keys():
@@ -40,9 +41,22 @@ def test_values_and_empty_keys():
     assert cfg.avd_dir == Path("/var/tmp/x/avd/pixel-1.avd")
 
 
+def test_the_turn_port_and_host():
+    cfg = config.load({"APPLIANCE_TURN_PORT": "44178", "APPLIANCE_TURN_HOST": "turn.example.org", "APPLIANCE_TURNSERVER": "/x/turnserver"})
+    assert (cfg.turn_port, cfg.turn_host, cfg.turnserver_bin) == (44178, "turn.example.org", "/x/turnserver")
+    for host, expected in (("192.168.1.9", "192.168.1.9"), ("fd7a:115c::1", "fd7a:115c::1"), ("[fd7a::1]", "fd7a::1"), ("", "")):
+        assert config.load({"APPLIANCE_TURN_HOST": host}).turn_host == expected
+
+
 @pytest.mark.parametrize(
     "key, value",
     [
+        ("APPLIANCE_TURN_HOST", "turn.example.org:3478"),
+        ("APPLIANCE_TURN_HOST", "https://turn.example.org"),
+        ("APPLIANCE_TURN_HOST", "bad host"),
+        ("APPLIANCE_TURN_HOST", "-x"),
+        ("APPLIANCE_TURN_PORT", "0"),
+        ("APPLIANCE_TURN_PORT", "udp"),
         ("APPLIANCE_GPU", "swiftshader_indirect"),
         ("APPLIANCE_CORES", "0"),
         ("APPLIANCE_CORES", "four"),

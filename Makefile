@@ -1,4 +1,4 @@
-.PHONY: test check smoke e2e
+.PHONY: test check smoke e2e e2e-webrtc
 
 # Run every suite that needs no emulator.
 test:
@@ -15,3 +15,9 @@ smoke:
 # instance from the built image, tests it, and removes it again.
 e2e:
 	./tests/e2e/lifecycle.sh
+
+# End-to-end test of the v2 dashboard in Chromium against a real Android
+# (needs Playwright, see README): installs its own instance, tests it, and
+# removes it again.
+e2e-webrtc:
+	./tests/e2e/webrtc.sh

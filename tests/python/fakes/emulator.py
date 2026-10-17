@@ -3,11 +3,14 @@ EmulatorController gRPC server. The scenario comes from config.json."""
 
 import fcntl
 import io
+import json
 import os
+import queue
 import signal
 import sys
 import threading
 import time
+import uuid
 from concurrent import futures
 from pathlib import Path
 
@@ -16,6 +19,8 @@ import appliance._proto  # noqa: F401  (puts the stubs on sys.path)
 import emulator_controller_pb2 as pb
 import emulator_controller_pb2_grpc as pb_grpc
 import grpc
+import rtc_service_v2_pb2 as rtc_pb
+import rtc_service_v2_pb2_grpc as rtc_grpc
 from google.protobuf import empty_pb2
 from PIL import Image
 
@@ -35,6 +40,10 @@ class RequireToken(grpc.ServerInterceptor):
         def refuse(request, context):
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "Missing the 'authorization' header with security credentials.")
 
+        # The refusal has the kind of the method that was called.
+        handler = continuation(handler_call_details)
+        if handler is not None and handler.response_streaming:
+            return grpc.unary_stream_rpc_method_handler(refuse)
         return grpc.unary_unary_rpc_method_handler(refuse)
 
 
@@ -56,6 +65,12 @@ class Controller(pb_grpc.EmulatorControllerServicer):
     def getScreenshot(self, request, context):
         if self.scenario["screenshot_fails"]:
             context.abort(grpc.StatusCode.UNAVAILABLE, "screenshots are broken")
+        if request.format == pb.ImageFormat.RGB888:
+            # A scaled picture: one shade, set by the scenario.
+            shade = int(common.config()["display"]) % 256
+            width, height = request.width or 1080, request.height or 1920
+            common.record("thumbnail", {"width": width, "height": height})
+            return pb.Image(format=pb.ImageFormat(format=request.format, width=width, height=height), image=bytes([shade, 0, 0]) * width * height)
         return pb.Image(format=pb.ImageFormat(format=pb.ImageFormat.PNG, width=1080, height=1920), image=self.screen)
 
     def getClipboard(self, request, context):
@@ -79,6 +94,63 @@ class Controller(pb_grpc.EmulatorControllerServicer):
             elif event.HasField("key_event"):
                 common.record("input", {"type": "key", **key_fields(event.key_event)})
         return empty_pb2.Empty()
+
+
+OFFER = (Path(__file__).parent / "offer.sdp").read_text().replace("\n", "\r\n")
+
+
+class Rtc(rtc_grpc.RtcServicer):
+    """The WebRTC signaling of the emulator: an offer and candidates for
+    each stream, then whatever the viewer sends. A stream ends when the
+    scenario says so (see common.py), and the fake records what it saw."""
+
+    def __init__(self):
+        self.streams: dict[str, dict] = {}
+
+    def RequestRtcStream(self, request, context):
+        guid = str(uuid.uuid4())
+        urls = [url for server in request.ice_server_config.ice_servers for url in server.urls]
+        outbox = queue.Queue()
+        # The start message echoes the ICE configuration, as the real one does.
+        outbox.put({"start": {"ice_servers": [{"urls": urls}]}})
+        outbox.put({"sdp": OFFER, "type": "offer"})
+        for port in (34904, 40000):
+            outbox.put({"candidate": f"candidate:1 1 udp 2122194687 192.168.1.243 {port} typ host generation 0", "sdpMid": "0", "sdpMLineIndex": 0})
+        outbox.put({"candidate": "", "sdpMid": "0", "sdpMLineIndex": 0})
+        self.streams[guid] = {"outbox": outbox, "released": None}
+        common.record("rtc", {"event": "request", "guid": guid, "urls": urls})
+        return rtc_pb.RtcStreamResponse(id=rtc_pb.Id(guid=guid))
+
+    def ReceiveJsepMessageStream(self, request, context):
+        guid = request.id.guid
+        stream = self.streams.get(guid)
+        if stream is None:
+            context.abort(grpc.StatusCode.NOT_FOUND, "no such stream")
+        common.record("rtc", {"event": "receive", "guid": guid})
+        context.add_callback(lambda: common.record("rtc", {"event": "receive-closed", "guid": guid}))
+        while context.is_active():
+            if (common.root() / "rtc-bye").exists() or (stream["released"] and time.time() >= stream["released"]):
+                yield rtc_pb.ReceiveJsepMessageResponse(jsep_msg=rtc_pb.JsepMsg(id=request.id, message=json.dumps({"bye": "disconnected"})))
+                return
+            if (common.root() / "rtc-eof").exists():
+                return
+            try:
+                message = stream["outbox"].get(timeout=0.02)
+            except queue.Empty:
+                continue
+            yield rtc_pb.ReceiveJsepMessageResponse(jsep_msg=rtc_pb.JsepMsg(id=request.id, message=json.dumps(message)))
+
+    def SendJsepMessage(self, request, context):
+        guid = request.jsep_msg.id.guid
+        stream = self.streams.get(guid)
+        if stream is None:
+            context.abort(grpc.StatusCode.NOT_FOUND, "no such stream")
+        message = json.loads(request.jsep_msg.message)
+        common.record("rtc", {"event": "send", "guid": guid, "message": message})
+        delay = common.config()["rtc_release_after"]
+        if message.get("type") == "answer" and delay is not None:
+            stream["released"] = time.time() + delay
+        return rtc_pb.SendJsepMessageResponse()
 
 
 def key_fields(event: pb.KeyboardEvent) -> dict:
@@ -133,8 +205,10 @@ def main() -> int:
         while True:
             time.sleep(1)
 
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8), interceptors=[RequireToken()])
+    # A signaling stream holds a thread for its whole life.
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=32), interceptors=[RequireToken()])
     pb_grpc.add_EmulatorControllerServicer_to_server(Controller(scenario), server)
+    rtc_grpc.add_RtcServicer_to_server(Rtc(), server)
     port = server.add_insecure_port("127.0.0.1:0")
     server.start()
 

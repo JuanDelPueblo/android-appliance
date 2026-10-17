@@ -20,7 +20,9 @@ from . import __version__, api, config
 from .auth import Auth
 from .backend import Backend, LogBuffer
 from .client import Client
+from .session import MAX_MESSAGE, Hub
 from .supervisor import Supervisor
+from .turn import Turn
 
 log = logging.getLogger("appliance")
 
@@ -64,6 +66,7 @@ def _server(app: object, limit: int | None = None) -> _Server:
             server_header=False,
             timeout_graceful_shutdown=5,
             limit_concurrency=limit,
+            ws_max_size=MAX_MESSAGE,
         )
     )
 
@@ -113,10 +116,14 @@ async def serve(cfg: config.Config) -> int:
 
     log.info("android appliance %s starting", __version__)
     sup = Supervisor(cfg)
-    app = api.create_app(Backend(sup, buffer), Auth(cfg))
+    backend = Backend(sup, buffer)
+    turn = Turn(cfg)
+    hub = Hub(backend, turn)
+    app = api.create_app(backend, Auth(cfg), hub)
     tcp = socket.create_server(("0.0.0.0", cfg.http_port))
     unix = _unix_socket(cfg.socket_path)
     servers = [(_server(app, MAX_CONNECTIONS), tcp), (_server(api.local(app)), unix)]
+    await turn.start()
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -137,6 +144,8 @@ async def serve(cfg: config.Config) -> int:
     for server, _ in servers:
         server.should_exit = True
     await asyncio.gather(*tasks, return_exceptions=True)
+    await hub.close()
+    await turn.stop()
     stopped.cancel()
     watchdog.cancel()
     cfg.socket_path.unlink(missing_ok=True)
