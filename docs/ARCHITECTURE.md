@@ -15,7 +15,7 @@ with emulator 37.2.12 and the API 35 Google Play image.
 - The v1 lifecycle guarantees stay: Android cold boots on demand, stops
   when idle, stops gracefully, and keeps its userdata, apps and accounts.
 - One control backend, used by `androidctl`, the HTTP API, the dashboard
-  and the MCP server. No systemd or Hermes dependency inside it.
+  and the MCP server. No systemd dependency inside it.
 - Emulator-native WebRTC replaces scrcpy, Xvnc-as-display and noVNC.
 
 ## Overview
@@ -26,7 +26,8 @@ host                                     container "android-appliance"
 androidctl ──unix socket──────────────►  appliance daemon (python3 -m appliance serve)
   ($XDG_RUNTIME_DIR/android-appliance/     ├─ supervisor ──► emulator (qemu, -no-window)
    api.sock)                               │                  └─ Xvnc :0 -rendernode (GPU GLX only)
-browser / MCP client ─TCP 6090─(pasta)─►   ├─ HTTP API, dashboard, MCP (/mcp), WebSocket
+androidctl mcp ──podman exec───────────►  python3 -m appliance mcp (MCP over stdio, uses the socket)
+browser ─TCP 6090─(pasta)──────────────►   ├─ HTTP API, dashboard, WebSocket
 browser media ──TURN 3478 udp/tcp───────►  ├─ coturn (relay to the container only)
                                            └─ adb server, gRPC client (emulator :8554)
 /var/lib/... or ~/.local/share/... ──────► /data  (AVD, adb keys, appliance state)
@@ -39,7 +40,7 @@ publishes two ports, by default on 127.0.0.1:
 
 | Port | Use |
 |---|---|
-| `APPLIANCE_PORT` (6090/tcp) | dashboard, REST API, WebSocket session, MCP |
+| `APPLIANCE_PORT` (6090/tcp) | dashboard, REST API, WebSocket session |
 | `APPLIANCE_TURN_PORT` (3478/udp+tcp) | WebRTC media through TURN |
 
 ### What the guest can reach
@@ -1108,10 +1109,10 @@ shell <command...> | install <apk> [-r|-g|-d|-t...] | push <local> <remote> | pu
 New: `dashboard` (one-time login link), `long-press x y [ms]`, `apps [--all]`,
 `launch <pkg>`, `force-stop <pkg>`, `uninstall <pkg> [-k]`, `ls <remote>`,
 `logs [emulator|daemon] [-n N]`, `token [--rotate]`, `doctor`, `version`.
-`mcp` (stdio MCP server through `podman exec -i <name> python -m appliance
-mcp`) comes with the MCP server: until the daemon has it, `androidctl mcp`
-fails with "mcp is not available in this version" and the usage does not
-list it.
+`mcp` serves the MCP tools over stdio through `podman exec -i <name>
+/opt/appliance/venv/bin/python -m appliance mcp` (see MCP); it starts the
+user unit first when the daemon does not answer, and refuses to run with
+`ANDROID_APPLIANCE_URL`.
 
 Differences from v1 that the API makes:
 
