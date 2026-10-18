@@ -14,6 +14,7 @@ import time
 from collections.abc import Generator
 from pathlib import Path
 
+import httpx2
 import uvicorn
 
 from . import __version__, api, config
@@ -119,7 +120,14 @@ async def serve(cfg: config.Config) -> int:
     backend = Backend(sup, buffer)
     turn = Turn(cfg)
     hub = Hub(backend, turn)
-    app = api.create_app(backend, Auth(cfg), hub)
+    auth = Auth(cfg)
+    # MCP over HTTP calls the API in this process, as a trusted local client.
+    from . import mcp_server
+
+    inner = api.create_app(backend, auth, hub)
+    client = Client(transport=httpx2.ASGITransport(app=api.local(inner)))
+    mcp_app = mcp_server.http_app(client)
+    app = api.create_app(backend, auth, hub, mcp=mcp_app)
     tcp = socket.create_server(("0.0.0.0", cfg.http_port))
     unix = _unix_socket(cfg.socket_path)
     servers = [(_server(app, MAX_CONNECTIONS), tcp), (_server(api.local(app)), unix)]
@@ -129,6 +137,9 @@ async def serve(cfg: config.Config) -> int:
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
+    # The MCP session manager runs for as long as the listeners do.
+    mcp_run = contextlib.AsyncExitStack()
+    await mcp_run.enter_async_context(mcp_app.router.lifespan_context(mcp_app))
     tasks = [asyncio.create_task(server.serve(sockets=[sock])) for server, sock in servers]
     watchdog = asyncio.create_task(_close_silent(servers[0][0]))
     stopped = asyncio.create_task(stop.wait())
@@ -144,6 +155,8 @@ async def serve(cfg: config.Config) -> int:
     for server, _ in servers:
         server.should_exit = True
     await asyncio.gather(*tasks, return_exceptions=True)
+    await mcp_run.aclose()
+    await client.close()
     await hub.close()
     await turn.stop()
     stopped.cancel()

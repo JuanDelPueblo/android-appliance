@@ -14,6 +14,7 @@ import httpx2
 import pytest
 from mcp import Client as McpClient
 from mcp.client.stdio import StdioServerParameters
+from mcp.client.streamable_http import streamable_http_client
 
 from appliance import api, mcp_server
 from appliance.auth import Auth
@@ -238,3 +239,65 @@ async def test_stdio_server_talks_to_a_running_daemon(cfg):
         except subprocess.TimeoutExpired:
             daemon.kill()
             daemon.wait()
+
+
+@contextlib.asynccontextmanager
+async def http_daemon(cfg) -> AsyncIterator[tuple[httpx2.AsyncClient, Auth]]:
+    """The daemon's app with /mcp mounted, as the daemon wires it, reached
+    like a TCP client (no unix socket, so the bearer token decides)."""
+    sup = Supervisor(cfg, FAST)
+    auth = Auth(cfg)
+    backend = Backend(sup, LogBuffer())
+    hub = Hub(backend, Turn(cfg))
+    inner = api.create_app(backend, auth, hub)
+    client = Client(transport=httpx2.ASGITransport(app=api.local(inner)))
+    mcp_app = mcp_server.http_app(client)
+    app = api.create_app(backend, auth, hub, mcp=mcp_app)
+    async with mcp_app.router.lifespan_context(mcp_app):
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://appliance:8080") as tcp:
+            try:
+                yield tcp, auth
+            finally:
+                await client.close()
+                await sup.shutdown()
+
+
+INITIALIZE = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}},
+}
+MCP_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+
+
+async def test_http_mcp_needs_the_token(cfg):
+    async with http_daemon(cfg) as (tcp, auth):
+        r = await tcp.post("/mcp", json=INITIALIZE, headers=MCP_HEADERS)
+        assert r.status_code == 401 and r.headers["www-authenticate"] == "Bearer"
+        r = await tcp.post("/mcp", json=INITIALIZE, headers={**MCP_HEADERS, "Authorization": "Bearer wrong"})
+        assert r.status_code == 401
+        # A dashboard session cookie does not open MCP.
+        r = await tcp.post("/mcp", json=INITIALIZE, headers={**MCP_HEADERS, "Cookie": f"appliance_session={auth.new_session()}"})
+        assert r.status_code == 401
+        r = await tcp.post("/mcp", json=INITIALIZE, headers={**MCP_HEADERS, "Authorization": f"Bearer {auth.token}"})
+        assert r.status_code == 200 and "android-appliance" in r.text
+
+
+async def test_http_mcp_serves_the_tools_with_progress(cfg, monkeypatch):
+    monkeypatch.setattr(mcp_server, "PROGRESS_INTERVAL", 0.01)
+    progress = []
+
+    async def on_progress(current, total, message):
+        progress.append(message)
+
+    async with http_daemon(cfg) as (tcp, auth):
+        tcp.headers["Authorization"] = f"Bearer {auth.token}"
+        async with McpClient(streamable_http_client("http://appliance:8080/mcp", http_client=tcp)) as mc:
+            listed = (await mc.list_tools()).tools
+            assert len(listed) == 22
+            status = json.loads(text(await mc.call_tool("android_start", {}, progress_callback=on_progress)))
+            assert status["state"] == "running"
+            assert progress and "android is starting" in progress[0]
+            assert text(await mc.call_tool("android_tap", {"x": 5, "y": 6})) == "tapped 5,6"
+            assert "not valid base64" in error(await mc.call_tool("android_push", {"path": "/sdcard/x", "content_base64": "!"}))

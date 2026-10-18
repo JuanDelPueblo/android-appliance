@@ -289,7 +289,17 @@ For Claude Code:
 claude mcp add android -- androidctl mcp
 ```
 
-There is no MCP over HTTP. A remote agent runs `androidctl` with `ANDROID_APPLIANCE_URL`, or uses an MCP client on the host where the appliance is installed.
+### MCP over HTTP
+
+The daemon also serves MCP over Streamable HTTP at `/mcp` on the HTTP port (`http://127.0.0.1:6090/mcp` by default), for agents that cannot run `androidctl`, such as one inside another container. It has the same tools and the same authentication as the API: `Authorization: Bearer <token>` (`androidctl token`). A dashboard cookie does not work there. The server is stateless, so restarting the appliance does not break a client's session. An APK sent through `android_install` travels as base64 in the request, up to 64 MiB of APK.
+
+```json
+{"mcpServers": {"android": {"type": "http", "url": "http://HOST:6090/mcp", "headers": {"Authorization": "Bearer TOKEN"}}}}
+```
+
+For Claude Code: `claude mcp add --transport http android http://HOST:6090/mcp --header "Authorization: Bearer $(androidctl token)"`.
+
+The port listens on 127.0.0.1 by default, and a rootless container does not reach the host's loopback. The client needs an address that reaches the published port: see Remote access for `APPLIANCE_LISTEN_ADDRESS` and for TLS in front. The token and the screenshots are plain HTTP unless a proxy adds TLS.
 
 | Tool | What it does |
 |---|---|

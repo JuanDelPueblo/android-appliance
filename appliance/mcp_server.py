@@ -17,9 +17,12 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
+from starlette.applications import Starlette
+
 import httpx2
 from mcp.server.mcpserver import Context, Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp_types import ContentBlock, TextContent
 
 from . import __version__
@@ -33,6 +36,9 @@ MAX_SHELL_OUTPUT = 256 * 1024
 MAX_PULL = 8 * 1024**2
 MAX_PUSH = 64 * 1024**2
 MAX_LOG_LINES = 5000
+# A request over HTTP carries a whole base64 APK (MAX_PUSH, a third larger).
+MAX_HTTP_BODY = MAX_PUSH * 4 // 3 + 1024**2
+MCP_PATH = "/mcp"
 # A lifecycle tool waits this long for a boot, then returns the state.
 DEFAULT_WAIT = 300.0
 PROGRESS_INTERVAL = 2.0
@@ -347,6 +353,23 @@ def create_server(client: Client) -> MCPServer:
     add(tools.push, "android_push", description="Write a device file from text or base64 content (up to 64 MiB). A directory path takes the file under its own name.")
     add(tools.logs, "android_logs", description="The last lines of the emulator log or of the appliance daemon log.")
     return server
+
+
+def http_app(client: Client) -> Starlette:
+    """The tools over Streamable HTTP at /mcp, for the daemon to mount.
+
+    Stateless, so a daemon restart does not strand a client on a dead
+    session; progress still streams in the answer to a call. The daemon
+    authenticates the request (bearer token) before it gets here, so the
+    SDK's Host and Origin check, which only knows localhost, is off.
+    The app's lifespan runs the session manager: the daemon must enter it.
+    """
+    return create_server(client).streamable_http_app(
+        streamable_http_path=MCP_PATH,
+        stateless_http=True,
+        max_request_body_size=MAX_HTTP_BODY,
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    )
 
 
 async def serve_stdio(socket_path: Path) -> None:

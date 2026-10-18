@@ -31,6 +31,7 @@ from .supervisor import LifecycleError
 log = logging.getLogger(__name__)
 
 API = "/api/v1"
+MCP = "/mcp"
 STATUS = {
     "bad_request": 400,
     "unauthorized": 401,
@@ -162,12 +163,15 @@ class AuthMiddleware:
             return
         conn = HTTPConnection(scope)
         principal = self._principal(conn)
+        if scope["path"] == MCP and principal == "session":
+            # MCP is for programs: a browser cookie must not drive it.
+            principal = None
         response: Response | None = None
         public = scope["path"] in PUBLIC_PATHS
         if principal == "blocked" and not public:
             response = error(conn, "rate_limited", "too many failed logins; wait a minute")
         elif principal is None and not public:
-            if scope["path"].startswith("/api/"):
+            if scope["path"].startswith("/api/") or scope["path"] == MCP:
                 response = error(
                     conn,
                     "unauthorized",
@@ -693,7 +697,7 @@ def hardened(app: ASGIApp) -> ASGIApp:
         if scope["type"] != "http":
             await app(scope, receive, send)
             return
-        api = scope["path"].startswith(API)
+        api = scope["path"].startswith(API) or scope["path"] == MCP
         private = api or scope["path"] in ("/login", "/logout")
 
         async def send_hardened(message: Any) -> None:
@@ -714,8 +718,19 @@ def hardened(app: ASGIApp) -> ASGIApp:
     return wrapped
 
 
-def create_app(backend: Backend, auth: Auth, hub: Hub) -> ASGIApp:
+def with_mcp(app: ASGIApp, mcp: ASGIApp) -> ASGIApp:
+    """Send the requests for /mcp to the MCP app, the rest to `app`."""
+
+    async def wrapped(scope: Scope, receive: Receive, send: Send) -> None:
+        await (mcp if scope["type"] == "http" and scope["path"] == MCP else app)(scope, receive, send)
+
+    return wrapped
+
+
+def create_app(backend: Backend, auth: Auth, hub: Hub, mcp: ASGIApp | None = None) -> ASGIApp:
     routes = Api(backend, auth, hub).routes(backend.cfg.web_dir)
     handlers = {cls: _handle for cls in (ApiError, OperationError, LifecycleError, HTTPException, Exception)}
-    app = Starlette(routes=routes, exception_handlers=handlers)  # type: ignore[arg-type]
+    app: ASGIApp = Starlette(routes=routes, exception_handlers=handlers)  # type: ignore[arg-type]
+    if mcp is not None:
+        app = with_mcp(app, mcp)
     return hardened(AuthMiddleware(app, auth))

@@ -1235,9 +1235,17 @@ serves the backend operations as tools over stdio. `androidctl mcp` runs
 `podman exec -i <name> /opt/appliance/venv/bin/python -m appliance mcp`,
 which talks to the daemon over its unix socket (`client`); the host needs
 no Python, and an agent configuration is just the command `androidctl mcp`.
-There is no MCP over HTTP: a remote agent runs `androidctl` with
-`ANDROID_APPLIANCE_URL` for the HTTP API, or an MCP client where the
-appliance is installed.
+The daemon also serves the same tools over Streamable HTTP at `/mcp`
+(`mcp_server.http_app`, mounted by `api.create_app(..., mcp=...)`). The
+MCP app calls the API in the same process through an ASGI `Client` marked
+local, so it needs no token of its own. The request is authenticated by
+`AuthMiddleware` before it reaches the SDK: the bearer token or the unix
+socket; a session cookie is refused, and a failure is a JSON 401. The SDK's
+Host/Origin check (it only knows localhost) is off for that reason. The
+server is stateless (no session ids; progress streams in the answer to a
+call), and the body limit covers a 64 MiB APK in base64. `serve` enters
+the app's lifespan, which runs the SDK's session manager, for as long as
+the listeners run.
 
 - Tool names start with `android_`: lifecycle (`status`, `start`, `stop`,
   `restart`, `wait`), `screenshot`, `ui`, input (`tap`, `long_press`,
